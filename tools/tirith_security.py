@@ -347,10 +347,24 @@ def _install_tirith(*, log_failures: bool = True) -> tuple[str | None, str]:
             return None, "checksum_failed"
 
         with tarfile.open(archive_path, "r:gz") as tar:
-            # Extract only the tirith binary (safety: reject paths with ..)
+            # Extract only the tirith binary.
+            # Safety: reject path traversal, symlinks, hardlinks, and
+            # device/special members.  A compromised archive could plant a
+            # symlink named "tirith" pointing to an attacker-controlled
+            # binary — when moved to ~/.hermes/bin/ and invoked, the agent
+            # would execute arbitrary code.
             for member in tar.getmembers():
                 if member.name == "tirith" or member.name.endswith("/tirith"):
                     if ".." in member.name:
+                        continue
+                    # Reject non-regular-file members (symlinks, hardlinks,
+                    # device nodes, directories, FIFOs).
+                    if not member.isfile():
+                        logger.warning(
+                            "tirith archive member '%s' is not a regular file "
+                            "(type=%s) — skipping to prevent symlink/hardlink attack",
+                            member.name, member.type,
+                        )
                         continue
                     member.name = "tirith"
                     tar.extract(member, tmpdir)

@@ -618,25 +618,42 @@ class DockerEnvironment(BaseEnvironment):
     def cleanup(self):
         """Stop and remove the container. Bind-mount dirs persist if persistent=True."""
         if self._container_id:
-            try:
-                # Stop in background so cleanup doesn't block
-                stop_cmd = (
-                    f"(timeout 60 {self._docker_exe} stop {self._container_id} || "
-                    f"{self._docker_exe} rm -f {self._container_id}) >/dev/null 2>&1 &"
-                )
-                subprocess.Popen(stop_cmd, shell=True)
-            except Exception as e:
-                logger.warning("Failed to stop container %s: %s", self._container_id, e)
+            container_id = self._container_id
+            docker_exe = self._docker_exe
+            persistent = self._persistent
 
-            if not self._persistent:
-                # Also schedule removal (stop only leaves it as stopped)
+            def _background_stop():
+                """Stop (and optionally remove) the container in a background thread."""
                 try:
-                    subprocess.Popen(
-                        f"sleep 3 && {self._docker_exe} rm -f {self._container_id} >/dev/null 2>&1 &",
-                        shell=True,
+                    subprocess.run(
+                        [docker_exe, "stop", container_id],
+                        capture_output=True, timeout=60,
                     )
-                except Exception:
-                    pass
+                except (subprocess.TimeoutExpired, Exception):
+                    # Stop timed out or failed — force remove
+                    try:
+                        subprocess.run(
+                            [docker_exe, "rm", "-f", container_id],
+                            capture_output=True, timeout=10,
+                        )
+                    except Exception:
+                        pass
+
+                if not persistent:
+                    try:
+                        subprocess.run(
+                            [docker_exe, "rm", "-f", container_id],
+                            capture_output=True, timeout=10,
+                        )
+                    except Exception:
+                        pass
+
+            try:
+                t = threading.Thread(target=_background_stop, daemon=True)
+                t.start()
+            except Exception as e:
+                logger.warning("Failed to stop container %s: %s", container_id, e)
+
             self._container_id = None
 
         if not self._persistent:
