@@ -2598,10 +2598,12 @@ def get_auth_status(provider_id: Optional[str] = None) -> Dict[str, Any]:
     return {"logged_in": False}
 
 
-def resolve_api_key_provider_credentials(provider_id: str) -> Dict[str, Any]:
+def resolve_api_key_provider_credentials(provider_id: str, ignore_env_base_url: bool = False) -> Dict[str, Any]:
     """Resolve API key and base URL for an API-key provider.
 
     Returns dict with: provider, api_key, base_url, source.
+    When ``ignore_env_base_url`` is True, skip the provider's explicit base URL
+    env override and compute the auto/default endpoint only.
     """
     pconfig = PROVIDER_REGISTRY.get(provider_id)
     if not pconfig or pconfig.auth_type != "api_key":
@@ -2616,7 +2618,7 @@ def resolve_api_key_provider_credentials(provider_id: str) -> Dict[str, Any]:
     api_key, key_source = _resolve_api_key_provider_secret(provider_id, pconfig)
 
     env_url = ""
-    if pconfig.base_url_env_var:
+    if pconfig.base_url_env_var and not ignore_env_base_url:
         env_url = os.getenv(pconfig.base_url_env_var, "").strip()
 
     if provider_id in ("kimi-coding", "kimi-coding-cn"):
