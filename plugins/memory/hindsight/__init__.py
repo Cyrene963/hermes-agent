@@ -721,6 +721,14 @@ class HindsightMemoryProvider(MemoryProvider):
             logger.debug("sync_turn: skipped (auto_retain disabled)")
             return
 
+        # Per-platform retain gate: skip retain for platforms that can't
+        # provide reliable user isolation (e.g. iLink WeChat where all
+        # messages share the same from_user_id).
+        _disabled = getattr(self, '_retain_disabled_platforms', ('weixin',))
+        if getattr(self, '_platform', '') in _disabled:
+            logger.debug("sync_turn: skipped (platform %s in disabled list)", self._platform)
+            return
+
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc).isoformat()
 
