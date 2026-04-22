@@ -11,6 +11,7 @@ def _hermes_home_path() -> Path:
     """Resolve the active HERMES_HOME (profile-aware) without circular imports."""
     try:
         from hermes_constants import get_hermes_home  # local import to avoid cycles
+
         return get_hermes_home()
     except Exception:
         return Path(os.path.expanduser("~/.hermes"))
@@ -97,8 +98,33 @@ def is_write_denied(path: str) -> bool:
         if resolved.startswith(prefix):
             return True
 
+    # New: Check for Hermes control files and mcp-tokens directory
+    hermes_home = _hermes_home_path()
+    hermes_home_real = os.path.realpath(hermes_home)
+
+    # Check for exact control files
+    hermes_control_files = [
+        os.path.join(hermes_home_real, "auth.json"),
+        os.path.join(hermes_home_real, "config.yaml"),
+        os.path.join(hermes_home_real, "webhook_subscriptions.json"),
+    ]
+    for control_file in hermes_control_files:
+        if resolved == os.path.realpath(control_file):
+            return True
+
+    # Check for anything inside mcp-tokens directory
+    mcp_tokens_dir = os.path.join(hermes_home_real, "mcp-tokens")
+    try:
+        mcp_tokens_dir_real = os.path.realpath(mcp_tokens_dir)
+        if resolved.startswith(mcp_tokens_dir_real + os.sep):
+            return True
+    except Exception:
+        pass
+
     safe_root = get_safe_write_root()
-    if safe_root and not (resolved == safe_root or resolved.startswith(safe_root + os.sep)):
+    if safe_root and not (
+        resolved == safe_root or resolved.startswith(safe_root + os.sep)
+    ):
         return True
 
     return False
