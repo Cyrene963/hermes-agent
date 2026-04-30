@@ -52,9 +52,16 @@ logger = logging.getLogger(__name__)
 # (HERMES_HOME env var changes) are always respected.  The old module-level
 # constant was cached at import time and could go stale if a profile switch
 # happened after the first import.
-def get_memory_dir() -> Path:
-    """Return the profile-scoped memories directory."""
-    return get_hermes_home() / "memories"
+def get_memory_dir(user_id: str = None) -> Path:
+    """Return the profile-scoped memories directory.
+    
+    When user_id is provided and different from 'global', returns a per-user
+    subdirectory (memories/{user_id}/) for multi-user isolation.
+    """
+    base = get_hermes_home() / "memories"
+    if user_id and user_id != "global":
+        return base / user_id
+    return base
 
 ENTRY_DELIMITER = "\n§\n"
 
@@ -115,17 +122,18 @@ class MemoryStore:
         Tool responses always reflect this live state.
     """
 
-    def __init__(self, memory_char_limit: int = 2200, user_char_limit: int = 1375):
+    def __init__(self, memory_char_limit: int = 2200, user_char_limit: int = 1375, user_id: str = None):
         self.memory_entries: List[str] = []
         self.user_entries: List[str] = []
         self.memory_char_limit = memory_char_limit
         self.user_char_limit = user_char_limit
+        self._user_id = user_id  # Per-user memory isolation
         # Frozen snapshot for system prompt -- set once at load_from_disk()
         self._system_prompt_snapshot: Dict[str, str] = {"memory": "", "user": ""}
 
     def load_from_disk(self):
         """Load entries from MEMORY.md and USER.md, capture system prompt snapshot."""
-        mem_dir = get_memory_dir()
+        mem_dir = get_memory_dir(self._user_id)
         mem_dir.mkdir(parents=True, exist_ok=True)
 
         self.memory_entries = self._read_file(mem_dir / "MEMORY.md")
@@ -179,8 +187,8 @@ class MemoryStore:
             fd.close()
 
     @staticmethod
-    def _path_for(target: str) -> Path:
-        mem_dir = get_memory_dir()
+    def _path_for(target: str, user_id: str = None) -> Path:
+        mem_dir = get_memory_dir(user_id)
         if target == "user":
             return mem_dir / "USER.md"
         return mem_dir / "MEMORY.md"
@@ -190,14 +198,14 @@ class MemoryStore:
 
         Called under file lock to get the latest state before mutating.
         """
-        fresh = self._read_file(self._path_for(target))
+        fresh = self._read_file(self._path_for(target, self._user_id))
         fresh = list(dict.fromkeys(fresh))  # deduplicate
         self._set_entries(target, fresh)
 
     def save_to_disk(self, target: str):
         """Persist entries to the appropriate file. Called after every mutation."""
-        get_memory_dir().mkdir(parents=True, exist_ok=True)
-        self._write_file(self._path_for(target), self._entries_for(target))
+        get_memory_dir(self._user_id).mkdir(parents=True, exist_ok=True)
+        self._write_file(self._path_for(target, self._user_id), self._entries_for(target))
 
     def _entries_for(self, target: str) -> List[str]:
         if target == "user":

@@ -33,7 +33,7 @@ T = TypeVar("T")
 
 DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -98,6 +98,32 @@ CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source);
 CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, timestamp);
+
+CREATE TABLE IF NOT EXISTS thread_goals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL REFERENCES sessions(id),
+    goal TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    round_count INTEGER DEFAULT 0,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    completed_at REAL
+);
+
+CREATE INDEX IF NOT EXISTS idx_thread_goals_session ON thread_goals(session_id);
+CREATE INDEX IF NOT EXISTS idx_thread_goals_status ON thread_goals(status);
+
+CREATE TABLE IF NOT EXISTS goal_round_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    goal_id INTEGER NOT NULL REFERENCES thread_goals(id) ON DELETE CASCADE,
+    round_number INTEGER NOT NULL,
+    action TEXT,
+    result TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_goal_round_history_goal ON goal_round_history(goal_id, round_number);
 """
 
 FTS_SQL = """
@@ -991,6 +1017,7 @@ class SessionDB:
         self,
         source: str = None,
         exclude_sources: List[str] = None,
+        user_id: str = None,
         limit: int = 20,
         offset: int = 0,
         include_children: bool = False,
@@ -1048,6 +1075,11 @@ class SessionDB:
             placeholders = ",".join("?" for _ in exclude_sources)
             where_clauses.append(f"s.source NOT IN ({placeholders})")
             params.extend(exclude_sources)
+
+        # Per-user session isolation
+        if user_id:
+            where_clauses.append("s.user_id = ?")
+            params.append(user_id)
 
         where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
         if order_by_last_active:
@@ -1711,6 +1743,7 @@ class SessionDB:
         source_filter: List[str] = None,
         exclude_sources: List[str] = None,
         role_filter: List[str] = None,
+        user_id: str = None,
         limit: int = 20,
         offset: int = 0,
     ) -> List[Dict[str, Any]]:
@@ -1751,6 +1784,11 @@ class SessionDB:
             role_placeholders = ",".join("?" for _ in role_filter)
             where_clauses.append(f"m.role IN ({role_placeholders})")
             params.extend(role_filter)
+
+        # Per-user session isolation: only search sessions belonging to this user
+        if user_id:
+            where_clauses.append("s.user_id = ?")
+            params.append(user_id)
 
         where_sql = " AND ".join(where_clauses)
         params.extend([limit, offset])
@@ -1954,6 +1992,7 @@ class SessionDB:
     def search_sessions(
         self,
         source: str = None,
+        user_id: str = None,
         limit: int = 20,
         offset: int = 0,
     ) -> List[Dict[str, Any]]:
@@ -1972,19 +2011,22 @@ class SessionDB:
             ") m ON m.session_id = s.id "
         )
         with self._lock:
+            where_parts = []
+            params = []
             if source:
-                cursor = self._conn.execute(
-                    f"{select_with_last_active}"
-                    "WHERE s.source = ? "
-                    "ORDER BY last_active DESC, s.started_at DESC, s.id DESC LIMIT ? OFFSET ?",
-                    (source, limit, offset),
-                )
-            else:
-                cursor = self._conn.execute(
-                    f"{select_with_last_active}"
-                    "ORDER BY last_active DESC, s.started_at DESC, s.id DESC LIMIT ? OFFSET ?",
-                    (limit, offset),
-                )
+                where_parts.append("s.source = ?")
+                params.append(source)
+            if user_id:
+                where_parts.append("s.user_id = ?")
+                params.append(user_id)
+            where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
+            params.extend([limit, offset])
+            cursor = self._conn.execute(
+                f"{select_with_last_active}"
+                f"{where_sql} "
+                "ORDER BY last_active DESC, s.started_at DESC, s.id DESC LIMIT ? OFFSET ?",
+                params,
+            )
             return [dict(row) for row in cursor.fetchall()]
 
     # =========================================================================
@@ -2568,6 +2610,109 @@ class SessionDB:
             session["preview"] = raw[:60] + ("..." if len(raw) > 60 else "") if raw else ""
             sessions.append(session)
         return sessions
+
+    # ── Thread goals ──
+
+    def get_goal(self, goal_id: int) -> Optional[Dict[str, Any]]:
+        """Get a thread goal by its ID."""
+        with self._lock:
+            cursor = self._conn.execute(
+                "SELECT * FROM thread_goals WHERE id = ?", (goal_id,)
+            )
+            row = cursor.fetchone()
+        return dict(row) if row else None
+
+    def create_goal(
+        self,
+        session_id: str,
+        goal: str,
+        status: str = "active",
+    ) -> int:
+        """Create a new thread goal. Returns the new goal ID."""
+        now = time.time()
+
+        def _do(conn):
+            cursor = conn.execute(
+                "INSERT INTO thread_goals (session_id, goal, status, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (session_id, goal, status, now, now),
+            )
+            return cursor.lastrowid
+
+        return self._execute_write(_do)
+
+    def update_goal(
+        self,
+        goal_id: int,
+        *,
+        goal: Optional[str] = None,
+        status: Optional[str] = None,
+        round_count: Optional[int] = None,
+        completed: bool = False,
+    ) -> bool:
+        """Update fields on an existing thread goal.
+
+        Only non-None keyword args are written.  Returns True if a row
+        was updated.
+        """
+        now = time.time()
+
+        def _do(conn):
+            sets: List[str] = ["updated_at = ?"]
+            params: List[Any] = [now]
+            if goal is not None:
+                sets.append("goal = ?")
+                params.append(goal)
+            if status is not None:
+                sets.append("status = ?")
+                params.append(status)
+            if round_count is not None:
+                sets.append("round_count = ?")
+                params.append(round_count)
+            if completed:
+                sets.append("completed_at = ?")
+                params.append(now)
+            params.append(goal_id)
+            cursor = conn.execute(
+                f"UPDATE thread_goals SET {', '.join(sets)} WHERE id = ?",
+                params,
+            )
+            return cursor.rowcount
+
+        return self._execute_write(_do) > 0
+
+    def record_goal_round(
+        self,
+        goal_id: int,
+        round_number: int,
+        action: Optional[str] = None,
+        result: Optional[str] = None,
+        status: str = "pending",
+    ) -> int:
+        """Record a round in goal_round_history.  Returns the new row ID."""
+        now = time.time()
+
+        def _do(conn):
+            cursor = conn.execute(
+                "INSERT INTO goal_round_history "
+                "(goal_id, round_number, action, result, status, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (goal_id, round_number, action, result, status, now),
+            )
+            return cursor.lastrowid
+
+        return self._execute_write(_do)
+
+    def get_goal_round_history(self, goal_id: int) -> List[Dict[str, Any]]:
+        """Get all rounds for a goal, ordered by round_number."""
+        with self._lock:
+            cursor = self._conn.execute(
+                "SELECT * FROM goal_round_history "
+                "WHERE goal_id = ? ORDER BY round_number",
+                (goal_id,),
+            )
+            rows = cursor.fetchall()
+        return [dict(r) for r in rows]
 
     # ── Space reclamation ──
 
