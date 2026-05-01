@@ -149,7 +149,7 @@ from agent.model_metadata import (
 from agent.context_compressor import ContextCompressor
 from agent.subdirectory_hints import SubdirectoryHintTracker
 from agent.prompt_caching import apply_anthropic_cache_control
-from agent.prompt_builder import build_skills_system_prompt, build_context_files_prompt, build_environment_hints, load_soul_md, TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS, GOOGLE_MODEL_OPERATIONAL_GUIDANCE, OPENAI_MODEL_EXECUTION_GUIDANCE
+from agent.prompt_builder import build_skills_system_prompt, build_skills_system_prompt_semantic, build_context_files_prompt, build_environment_hints, load_soul_md, TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS, GOOGLE_MODEL_OPERATIONAL_GUIDANCE, OPENAI_MODEL_EXECUTION_GUIDANCE
 from agent.usage_pricing import estimate_usage_cost, normalize_usage
 from agent.codex_responses_adapter import (
     _derive_responses_function_call_id as _codex_derive_responses_function_call_id,
@@ -5083,10 +5083,32 @@ class AIAgent:
                 )
                 if toolset
             }
-            skills_prompt = build_skills_system_prompt(
-                available_tools=self.valid_tool_names,
-                available_toolsets=avail_toolsets,
-            )
+            # Check config for semantic retrieval mode
+            from hermes_constants import get_hermes_home
+            import yaml
+            try:
+                config_path = get_hermes_home() / "config.yaml"
+                with open(config_path, "r") as f:
+                    _cfg = yaml.safe_load(f) or {}
+                _skills_cfg = _cfg.get("skills", {}) if isinstance(_cfg, dict) else {}
+                retrieval_mode = _skills_cfg.get("retrieval", "broadcast") if isinstance(_skills_cfg, dict) else "broadcast"
+                top_k = int(_skills_cfg.get("top_k", 15)) if isinstance(_skills_cfg, dict) else 15
+            except Exception:
+                retrieval_mode = "broadcast"
+                top_k = 15
+
+            if retrieval_mode == "semantic":
+                skills_prompt = build_skills_system_prompt_semantic(
+                    user_message="",  # Will be filled on first turn via message context
+                    available_tools=self.valid_tool_names,
+                    available_toolsets=avail_toolsets,
+                    top_k=top_k,
+                )
+            else:
+                skills_prompt = build_skills_system_prompt(
+                    available_tools=self.valid_tool_names,
+                    available_toolsets=avail_toolsets,
+                )
         else:
             skills_prompt = ""
         if skills_prompt:

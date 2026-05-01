@@ -715,6 +715,116 @@ def _skill_should_show(
     return True
 
 
+def build_skills_system_prompt_semantic(
+    user_message: str = "",
+    available_tools: "set[str] | None" = None,
+    available_toolsets: "set[str] | None" = None,
+    top_k: int = 15,
+) -> str:
+    """Build a compact skill index using FTS5 semantic retrieval.
+
+    Instead of injecting ALL skills (~4500 tokens), this function:
+    1. Searches the FTS5 index for skills relevant to the user's message
+    2. Gets top-K by usage (proven useful)
+    3. Combines both sets (deduplicated) for ~200 tokens total
+
+    Falls back to broadcast mode if SkillDB is empty or unavailable.
+    """
+    try:
+        from agent.skill_db import SkillDB
+        from gateway.session_context import get_session_env
+        import os
+
+        db = SkillDB()
+
+        # Check if DB has any skills
+        if db.get_skill_count() == 0:
+            # DB empty, fall back to broadcast
+            logger.debug("SkillDB empty, falling back to broadcast")
+            return build_skills_system_prompt(available_tools, available_toolsets)
+
+        # Get disabled skills
+        from agent.skill_utils import get_disabled_skill_names
+        disabled = get_disabled_skill_names()
+
+        # Get top-K by usage (these are proven useful)
+        top_by_usage = db.get_top_by_usage(limit=top_k // 3)
+
+        # Get FTS5 matches for current message
+        semantic_matches = []
+        if user_message.strip():
+            semantic_matches = db.search(
+                user_message,
+                limit=top_k,
+                boost_recent=True,
+            )
+
+        # Combine and deduplicate
+        seen_names = set()
+        combined = []
+
+        # Add semantic matches first (most relevant to current task)
+        for skill in semantic_matches:
+            name = skill["name"]
+            if name not in seen_names and name not in disabled:
+                seen_names.add(name)
+                combined.append(skill)
+
+        # Add top by usage (fill up to top_k)
+        for skill in top_by_usage:
+            name = skill["name"]
+            if name not in seen_names and name not in disabled:
+                seen_names.add(name)
+                combined.append(skill)
+                if len(combined) >= top_k:
+                    break
+
+        if not combined:
+            return build_skills_system_prompt(available_tools, available_toolsets)
+
+        # Build index lines
+        index_lines = []
+        for skill in combined:
+            name = skill["name"]
+            desc = skill.get("description", "")
+            if desc:
+                index_lines.append(f"    - {name}: {desc}")
+            else:
+                index_lines.append(f"    - {name}")
+
+        result = (
+            "## Skills (mandatory)\n"
+            "Before replying, scan the skills below. If a skill matches or is even partially relevant "
+            "to your task, you MUST load it with skill_view(name) and follow its instructions. "
+            "Err on the side of loading — it is always better to have context you don't need "
+            "than to miss critical steps, pitfalls, or established workflows. "
+            "Skills contain specialized knowledge — API endpoints, tool-specific commands, "
+            "and proven workflows that outperform general-purpose approaches. Load the skill "
+            "even if you think you could handle the task with basic tools like web_search or terminal. "
+            "Skills also encode the user's preferred approach, conventions, and quality standards "
+            "for tasks like code review, planning, and testing — load them even for tasks you "
+            "already know how to do, because the skill defines how it should be done here.\n"
+            "\n"
+            "<available_skills>\n"
+            + "\n".join(index_lines) + "\n"
+            "</available_skills>\n"
+            "\n"
+            "Only proceed without loading a skill if genuinely none are relevant to the task."
+        )
+
+        logger.debug(
+            "Semantic skill retrieval: %d skills injected (of %d total) for query: %r",
+            len(combined),
+            db.get_skill_count(),
+            user_message[:50],
+        )
+        return result
+
+    except Exception as e:
+        logger.warning("Semantic skill retrieval failed, falling back to broadcast: %s", e)
+        return build_skills_system_prompt(available_tools, available_toolsets)
+
+
 def build_skills_system_prompt(
     available_tools: "set[str] | None" = None,
     available_toolsets: "set[str] | None" = None,
