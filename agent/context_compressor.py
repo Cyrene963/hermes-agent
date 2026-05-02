@@ -364,6 +364,7 @@ class ContextCompressor(ContextEngine):
         api_key: str = "",
         provider: str = "",
         api_mode: str = "",
+        threshold_percent: float | None = None,
     ) -> None:
         """Update model info after a model switch or fallback activation."""
         self.model = model
@@ -372,6 +373,8 @@ class ContextCompressor(ContextEngine):
         self.provider = provider
         self.api_mode = api_mode
         self.context_length = context_length
+        if threshold_percent is not None:
+            self.threshold_percent = threshold_percent
         self.threshold_tokens = max(
             int(context_length * self.threshold_percent),
             MINIMUM_CONTEXT_LENGTH,
@@ -914,17 +917,23 @@ The user has requested that this compaction PRIORITISE preserving all informatio
                 or "does not exist" in _err_str
                 or "no available channel" in _err_str
             )
+            _is_rate_limited = (
+                _status == 413
+                or "rate limit" in _err_str
+                or "tpm" in _err_str
+                or "tokens per minute" in _err_str
+            )
             if (
                 _is_model_not_found
-                and self.summary_model
-                and self.summary_model != self.model
                 and not getattr(self, "_summary_model_fallen_back", False)
+                and (not self.summary_model or self.summary_model != self.model)
             ):
                 self._summary_model_fallen_back = True
+                _had_aux_model = bool(self.summary_model)
                 logging.warning(
                     "Summary model '%s' not available (%s). "
                     "Falling back to main model '%s' for compression.",
-                    self.summary_model, e, self.model,
+                    self.summary_model or "(default)", e, self.model,
                 )
                 # Record the aux-model failure so callers can warn the user
                 # even if the retry-on-main succeeds — a misconfigured aux
@@ -933,8 +942,15 @@ The user has requested that this compaction PRIORITISE preserving all informatio
                 if len(_err_text) > 220:
                     _err_text = _err_text[:217].rstrip() + "..."
                 self._last_aux_model_failure_error = _err_text
-                self._last_aux_model_failure_model = self.summary_model
-                self.summary_model = ""  # empty = use main model
+                self._last_aux_model_failure_model = self.summary_model or "(default)"
+                # When summary_model was explicitly set to a different model,
+                # clear it so the retry uses the default (main) provider.
+                # When it was empty (no override configured), the default
+                # provider may differ from self.model — set it explicitly.
+                if _had_aux_model:
+                    self.summary_model = ""
+                else:
+                    self.summary_model = self.model
                 self._summary_failure_cooldown_until = 0.0  # no cooldown
                 return self._generate_summary(turns_to_summarize, focus_topic=focus_topic)  # retry immediately
 
@@ -948,15 +964,18 @@ The user has requested that this compaction PRIORITISE preserving all informatio
             # aggregator rejections, etc.) where auto-retry is still safer
             # than dropping the turns.
             if (
-                self.summary_model
-                and self.summary_model != self.model
-                and not getattr(self, "_summary_model_fallen_back", False)
+                not getattr(self, "_summary_model_fallen_back", False)
+                and (
+                    (self.summary_model and self.summary_model != self.model)
+                    or (not self.summary_model and (_is_rate_limited or _is_model_not_found))
+                )
             ):
                 self._summary_model_fallen_back = True
+                _had_aux_model = bool(self.summary_model)
                 logging.warning(
                     "Summary model '%s' failed (%s). "
                     "Retrying on main model '%s' before giving up.",
-                    self.summary_model, e, self.model,
+                    self.summary_model or "(default)", e, self.model,
                 )
                 # Record the aux-model failure (see 404 branch above) — user
                 # should know their configured model is broken even if main
@@ -965,8 +984,11 @@ The user has requested that this compaction PRIORITISE preserving all informatio
                 if len(_err_text) > 220:
                     _err_text = _err_text[:217].rstrip() + "..."
                 self._last_aux_model_failure_error = _err_text
-                self._last_aux_model_failure_model = self.summary_model
-                self.summary_model = ""  # empty = use main model
+                self._last_aux_model_failure_model = self.summary_model or "(default)"
+                if _had_aux_model:
+                    self.summary_model = ""
+                else:
+                    self.summary_model = self.model
                 self._summary_failure_cooldown_until = 0.0
                 return self._generate_summary(turns_to_summarize, focus_topic=focus_topic)
 
@@ -1009,17 +1031,40 @@ The user has requested that this compaction PRIORITISE preserving all informatio
     def _sanitize_tool_pairs(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Fix orphaned tool_call / tool_result pairs after compression.
 
-        Two failure modes:
-        1. A tool *result* references a call_id whose assistant tool_call was
+        Three failure modes:
+        1. A tool *result* has a missing/null/empty ``tool_call_id`` field.
+           The API rejects this with ``tool_call_id is not set`` (HTTP 400).
+           Compression can produce these when messages are copied or when
+           upstream providers return malformed tool messages.
+        2. A tool *result* references a call_id whose assistant tool_call was
            removed (summarized/truncated).  The API rejects this with
            "No tool call found for function call output with call_id ...".
-        2. An assistant message has tool_calls whose results were dropped.
+        3. An assistant message has tool_calls whose results were dropped.
            The API rejects this because every tool_call must be followed by
            a tool result with the matching call_id.
 
-        This method removes orphaned results and inserts stub results for
-        orphaned calls so the message list is always well-formed.
+        This method removes malformed/orphaned results and inserts stub
+        results for orphaned calls so the message list is always well-formed.
         """
+        # 0. Remove tool messages with missing/null/empty tool_call_id.
+        #    These slip through the orphan check below (they never enter
+        #    result_call_ids) but still cause API 400 errors.
+        malformed = [
+            m for m in messages
+            if m.get("role") == "tool" and not m.get("tool_call_id")
+        ]
+        if malformed:
+            messages = [
+                m for m in messages
+                if not (m.get("role") == "tool" and not m.get("tool_call_id"))
+            ]
+            if not self.quiet_mode:
+                logger.info(
+                    "Compression sanitizer: removed %d tool message(s) with "
+                    "missing/null/empty tool_call_id",
+                    len(malformed),
+                )
+
         surviving_call_ids: set = set()
         for msg in messages:
             if msg.get("role") == "assistant":

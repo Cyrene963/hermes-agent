@@ -376,6 +376,44 @@ class TestSummaryFallbackToMainModel:
         assert result is None
         assert c._summary_model_fallen_back is True
 
+    def test_empty_summary_model_413_falls_back_to_main(self):
+        """When summary_model_override is None (default), self.summary_model
+        is empty.  If the default provider returns a 413 rate-limit error,
+        the compressor should fall back to the main model explicitly."""
+        mock_ok = MagicMock()
+        mock_ok.choices = [MagicMock()]
+        mock_ok.choices[0].message.content = "summary via main model"
+
+        err_413 = Exception("413 TPM exhausted: rate limit exceeded")
+        err_413.status_code = 413
+
+        with patch("agent.context_compressor.get_model_context_length", return_value=100000):
+            c = ContextCompressor(
+                model="main-model",
+                summary_model_override=None,  # default — no aux model
+                quiet_mode=True,
+            )
+
+        # summary_model should be empty when no override is set
+        assert c.summary_model == ""
+
+        with patch(
+            "agent.context_compressor.call_llm",
+            side_effect=[err_413, mock_ok],
+        ) as mock_call:
+            result = c._generate_summary(self._msgs())
+
+        # Should retry: first call fails, second succeeds on main model
+        assert mock_call.call_count == 2
+        # Second call should explicitly use the main model
+        assert mock_call.call_args_list[1].kwargs.get("model") == "main-model"
+        assert result is not None
+        assert "summary via main model" in result
+        # Aux-model failure recorded with "(default)" placeholder
+        assert c._last_aux_model_failure_model == "(default)"
+        assert c._last_aux_model_failure_error is not None
+        assert "413" in c._last_aux_model_failure_error
+
 
 class TestAuxModelFallbackSurfacedToCallers:
     """When summary_model fails but retry-on-main succeeds, compress() must
@@ -663,6 +701,67 @@ class TestCompressWithClient:
         assert [m.get("tool_call_id") for m in sanitized if m.get("role") == "tool"] == [
             "call_123"
         ]
+
+    def test_sanitizer_removes_tool_messages_with_none_tool_call_id(self, compressor):
+        """Tool messages with tool_call_id=None must be removed — they cause
+        API 400 'tool_call_id is not set' errors (e.g. MiMo, OpenAI)."""
+        msgs = [
+            {"role": "user", "content": "hello"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": "tc_1", "function": {"name": "read_file", "arguments": "{}"}},
+                ],
+            },
+            {"role": "tool", "tool_call_id": "tc_1", "content": "file content"},
+            {"role": "tool", "tool_call_id": None, "content": "orphan with None id"},
+            {"role": "user", "content": "thanks"},
+        ]
+
+        sanitized = compressor._sanitize_tool_pairs(msgs)
+
+        tool_msgs = [m for m in sanitized if m.get("role") == "tool"]
+        assert len(tool_msgs) == 1
+        assert tool_msgs[0]["tool_call_id"] == "tc_1"
+
+    def test_sanitizer_removes_tool_messages_with_empty_tool_call_id(self, compressor):
+        """Tool messages with tool_call_id='' must be removed."""
+        msgs = [
+            {"role": "user", "content": "hello"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": "tc_1", "function": {"name": "terminal", "arguments": "{}"}},
+                ],
+            },
+            {"role": "tool", "tool_call_id": "tc_1", "content": "exit 0"},
+            {"role": "tool", "tool_call_id": "", "content": "empty id result"},
+            {"role": "tool", "content": "completely missing tool_call_id field"},
+        ]
+
+        sanitized = compressor._sanitize_tool_pairs(msgs)
+
+        tool_msgs = [m for m in sanitized if m.get("role") == "tool"]
+        assert len(tool_msgs) == 1
+        assert tool_msgs[0]["tool_call_id"] == "tc_1"
+
+    def test_sanitizer_removes_all_orphaned_when_no_assistant_calls(self, compressor):
+        """When there are no assistant tool_calls at all, all tool messages
+        (including those with valid-looking but orphaned IDs) should be removed."""
+        msgs = [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "let me check"},
+            {"role": "tool", "tool_call_id": "tc_old", "content": "stale result"},
+            {"role": "tool", "tool_call_id": None, "content": "null id result"},
+            {"role": "user", "content": "what happened?"},
+        ]
+
+        sanitized = compressor._sanitize_tool_pairs(msgs)
+
+        tool_msgs = [m for m in sanitized if m.get("role") == "tool"]
+        assert len(tool_msgs) == 0
 
     def test_summary_role_avoids_consecutive_user_messages(self):
         """Summary role should alternate with the last head message to avoid consecutive same-role messages."""

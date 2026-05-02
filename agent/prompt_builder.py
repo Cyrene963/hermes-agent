@@ -47,9 +47,12 @@ _CONTEXT_THREAT_PATTERNS = [
 ]
 
 _CONTEXT_INVISIBLE_CHARS = {
-    '\u200b', '\u200c', '\u200d', '\u2060', '\ufeff',
+    '\u200b', '\u200c', '\u2060', '\ufeff',
     '\u202a', '\u202b', '\u202c', '\u202d', '\u202e',
 }
+# NOTE: U+200D (ZWJ) is intentionally NOT in this set.  It is the standard
+# Unicode mechanism for gendered/compound emoji (🤸‍♀️, 👩‍💻, 👨‍👩‍👧‍👦).
+# See https://github.com/NousResearch/hermes-agent/issues/18581
 
 
 def _scan_context_content(content: str, filename: str) -> str:

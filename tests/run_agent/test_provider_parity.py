@@ -191,6 +191,23 @@ class TestBuildApiKwargsOpenRouter:
         anthropic_agent.api_mode = "anthropic_messages"
         assert anthropic_agent._should_sanitize_tool_calls() is True
 
+    def test_sanitize_tool_calls_strips_extra_content(self, monkeypatch):
+        """Strict providers like Fireworks reject extra_content on tool_calls."""
+        agent = _make_agent(monkeypatch, "openrouter")
+        api_msg = {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {"id": "call_1", "type": "function",
+                 "extra_content": {"google": {"thought_signature": "SIG_123"}},
+                 "function": {"name": "t", "arguments": "{}"}},
+            ],
+        }
+        result = agent._sanitize_tool_calls_for_strict_api(api_msg)
+        assert "extra_content" not in result["tool_calls"][0]
+        # Original message dict mutated in-place (by design)
+        assert "extra_content" not in api_msg["tool_calls"][0]
+
 
 class TestDeveloperRoleSwap:
     """GPT-5 and Codex models should get 'developer' instead of 'system' role."""

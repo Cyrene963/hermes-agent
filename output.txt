@@ -1,0 +1,12 @@
+[OFFICIAL ANNOUNCEMENT CONFIRMED]
+Topic: Claude Mythos
+Status: Officially Announced
+Source: Anthropic Official Newsroom / Blog (Project Glasswing / Mythos Preview)
+Announcement Date: April 7, 2026
+
+Details:
+Anthropic has officially announced "Claude Mythos Preview" as part of a new cybersecurity initiative called "Project Glasswing". The launch was confirmed via Anthropic's official site at `https://www.anthropic.com/glasswing` and `https://www.anthropic.com/news`.
+
+Mythos Preview is described as a general-purpose, unreleased frontier model with highly advanced agentic coding and reasoning capabilities. It is specifically designed to excel at finding and exploiting software vulnerabilities. It has already found thousands of zero-day vulnerabilities in every major operating system and web browser.
+
+Anthropic is partnering with organizations like Amazon Web Services, Apple, Broadcom, Cisco, CrowdStrike, Google, JPMorganChase, the Linux Foundation, Microsoft, NVIDIA, and Palo Alto Networks to secure critical software infrastructure. Anthropic is not making Claude Mythos Preview generally available to the public due to its potent cyber capabilities; instead, it is being provided to a consortium of partner organizations for defensive security purposes.

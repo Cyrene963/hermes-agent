@@ -302,6 +302,11 @@ class IterationBudget:
             if self._used > 0:
                 self._used -= 1
 
+    def reset(self) -> None:
+        """Reset the iteration counter (e.g. after emergency compression)."""
+        with self._lock:
+            self._used = 0
+
     @property
     def used(self) -> int:
         return self._used
@@ -2026,6 +2031,10 @@ class AIAgent:
                 api_mode=self.api_mode,
             )
         self.compression_enabled = compression_enabled
+        # Tracks how many emergency compressions have been done in this turn.
+        # Emergency compression fires when max_iterations is about to exhaust
+        # but the context is still large enough to benefit from compression.
+        self._emergency_compression_count = 0
 
         # Reject models whose context window is below the minimum required
         # for reliable tool-calling workflows (64K tokens).
@@ -2405,6 +2414,7 @@ class AIAgent:
                 api_key=getattr(self, "api_key", ""),
                 provider=self.provider,
                 api_mode=self.api_mode,
+                threshold_percent=self.context_compressor.threshold_percent,
             )
 
         # ── Invalidate cached system prompt so it rebuilds next turn ──
@@ -2427,6 +2437,7 @@ class AIAgent:
             "compressor_provider": getattr(_cc, "provider", self.provider) if _cc else self.provider,
             "compressor_context_length": _cc.context_length if _cc else 0,
             "compressor_threshold_tokens": _cc.threshold_tokens if _cc else 0,
+            "compressor_threshold_percent": _cc.threshold_percent if _cc else 0.50,
         }
         if api_mode == "anthropic_messages":
             self._primary_runtime.update({
@@ -5001,9 +5012,10 @@ class AIAgent:
             if context_files_prompt:
                 prompt_parts.append(context_files_prompt)
 
-        from hermes_time import now as _hermes_now
-        now = _hermes_now()
-        timestamp_line = f"Conversation started: {now.strftime('%A, %B %d, %Y %I:%M %p')}"
+        # Use session_start timestamp for stability across turns within the same session.
+        # Regenerating the timestamp on every API call would invalidate the KV cache
+        # prefix even though the session hasn't actually started at a different time.
+        timestamp_line = f"Conversation started: {self.session_start.strftime('%A, %B %d, %Y %I:%M %p')}"
         if self.pass_session_id and self.session_id:
             timestamp_line += f"\nSession ID: {self.session_id}"
         if self.model:
@@ -7669,6 +7681,7 @@ class AIAgent:
                     base_url=self.base_url,
                     api_key=getattr(self, "api_key", ""),
                     provider=self.provider,
+                    threshold_percent=self.context_compressor.threshold_percent,
                 )
 
             self._emit_status(
@@ -7748,6 +7761,7 @@ class AIAgent:
                 base_url=rt["compressor_base_url"],
                 api_key=rt["compressor_api_key"],
                 provider=rt["compressor_provider"],
+                threshold_percent=rt.get("compressor_threshold_percent"),
             )
 
             # ── Reset fallback chain for the new turn ──
@@ -8895,17 +8909,20 @@ class AIAgent:
         the internal message history — this method only modifies the outgoing
         API copy.
 
+        Also strips extra_content (e.g. Gemini thought_signature) which strict
+        providers like Fireworks reject with "Extra inputs are not permitted".
+
         Creates new tool_call dicts rather than mutating in-place, so the
         original messages list retains call_id/response_item_id for Codex
         Responses API compatibility (e.g. if the session falls back to a
         Codex provider later).
 
-        Fields stripped: call_id, response_item_id
+        Fields stripped: call_id, response_item_id, extra_content
         """
         tool_calls = api_msg.get("tool_calls")
         if not isinstance(tool_calls, list):
             return api_msg
-        _STRIP_KEYS = {"call_id", "response_item_id"}
+        _STRIP_KEYS = {"call_id", "response_item_id", "extra_content"}
         api_msg["tool_calls"] = [
             {k: v for k, v in tc.items() if k not in _STRIP_KEYS}
             if isinstance(tc, dict) else tc
@@ -9034,6 +9051,50 @@ class AIAgent:
             bool: True if sanitization is needed (non-Codex API), False otherwise.
         """
         return self.api_mode != "codex_responses"
+
+    def _sanitize_tool_messages_for_retry(self, messages: list) -> int:
+        """Remove tool messages with missing/null/empty tool_call_id in-place.
+
+        Called when the API rejects a request due to malformed tool messages
+        (classified as ``tool_message_malformed``).  Returns the number of
+        messages removed so the caller can decide whether to retry.
+        """
+        before = len(messages[:])  # snapshot for count
+        to_remove = set()
+        for i, msg in enumerate(messages):
+            if msg.get("role") == "tool" and not msg.get("tool_call_id"):
+                to_remove.add(i)
+        if not to_remove:
+            return 0
+        # Also remove orphaned tool results (valid tool_call_id but no
+        # matching assistant tool_call) and add stubs for tool_calls
+        # whose results were removed.
+        # Build surviving call IDs from assistant messages
+        surviving_call_ids = set()
+        for msg in messages:
+            if msg.get("role") == "assistant":
+                for tc in msg.get("tool_calls") or []:
+                    cid = tc.get("id", "") if isinstance(tc, dict) else getattr(tc, "id", "")
+                    if cid:
+                        surviving_call_ids.add(cid)
+        # Check remaining tool messages for orphans
+        for i, msg in enumerate(messages):
+            if i in to_remove:
+                continue
+            if msg.get("role") == "tool":
+                cid = msg.get("tool_call_id")
+                if cid and cid not in surviving_call_ids:
+                    to_remove.add(i)
+        # Remove in reverse order to preserve indices
+        for i in sorted(to_remove, reverse=True):
+            messages.pop(i)
+        removed = len(to_remove)
+        if removed:
+            logger.info(
+                "Tool message sanitizer (retry): removed %d malformed/orphaned tool message(s)",
+                removed,
+            )
+        return removed
 
     def _compress_context(self, messages: list, system_message: str, *, approx_tokens: int = None, task_id: str = "default", focus_topic: str = None) -> tuple:
         """Compress conversation context and split the session in SQLite.
@@ -10482,6 +10543,7 @@ class AIAgent:
         # They are initialized in __init__ and must persist across run_conversation
         # calls so that nudge logic accumulates correctly in CLI mode.
         self.iteration_budget = IterationBudget(self.max_iterations)
+        self._emergency_compression_count = 0
 
         # Log conversation turn start for debugging/observability
         _preview_text = _summarize_user_message_for_log(user_message)
@@ -10760,7 +10822,37 @@ class AIAgent:
                 if not self.quiet_mode:
                     self._safe_print("\n⚡ Breaking out of tool loop due to interrupt...")
                 break
-            
+
+            # Emergency compression: if budget is nearly exhausted but context is
+            # still large, compress and reset the budget to allow more iterations.
+            # This prevents max_iterations from killing the agent before compression
+            # has a chance to trigger (e.g. when tool outputs are small per iteration
+            # but accumulated context is large, or when the provider doesn't return
+            # usage data and should_compress(0) never fires). (ref: PR #18607)
+            if (not self._budget_grace_call
+                    and self.iteration_budget.remaining <= 1
+                    and self.compression_enabled
+                    and getattr(self, "_emergency_compression_count", 0) < 3):
+                _est_tokens = estimate_messages_tokens_rough(messages)
+                if _est_tokens > self.context_compressor.threshold_tokens:
+                    self._safe_print(
+                        "  ⟳ Emergency compression "
+                        f"(budget: {self.iteration_budget.remaining} remaining, "
+                        f"~{_est_tokens:,} tokens > {self.context_compressor.threshold_tokens:,} threshold)"
+                    )
+                    messages, active_system_prompt = self._compress_context(
+                        messages, system_message,
+                        approx_tokens=_est_tokens,
+                        task_id=effective_task_id,
+                    )
+                    self.iteration_budget.reset()
+                    api_call_count = 0  # Reset to allow full budget again
+                    conversation_history = None  # New session after compression
+                    self._emergency_compression_count = (
+                        getattr(self, "_emergency_compression_count", 0) + 1
+                    )
+                    continue
+
             api_call_count += 1
             self._api_call_count = api_call_count
             self._touch_activity(f"starting API call #{api_call_count}")
@@ -12580,6 +12672,25 @@ class AIAgent:
                                 "failed": True,
                                 "compression_exhausted": True,
                             }
+
+                    # ── Tool message sanitization recovery ────────────────
+                    # If the API rejected the request because of malformed
+                    # tool_call/result pairs (e.g. missing tool_call_id from
+                    # compression), sanitize the message history and retry
+                    # instead of falling back.  This recovers sessions that
+                    # got stuck after a bad compression pass.
+                    if classified.should_sanitize_tools:
+                        _sanitized = self._sanitize_tool_messages_for_retry(api_messages)
+                        if _sanitized > 0:
+                            self._emit_status(
+                                f"🔧 Fixed {_sanitized} malformed tool message(s) — retrying..."
+                            )
+                            continue
+                        else:
+                            logger.info(
+                                "tool_message_malformed classified but sanitizer "
+                                "found nothing to fix — falling through to normal handling"
+                            )
 
                     # Check for non-retryable client errors.  The classifier
                     # already accounts for 413, 429, 529 (transient), context

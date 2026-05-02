@@ -113,8 +113,9 @@ class ChatCompletionsTransport(ProviderTransport):
         """Messages are already in OpenAI format — sanitize Codex leaks only.
 
         Strips Codex Responses API fields (``codex_reasoning_items`` /
-        ``codex_message_items`` on the message, ``call_id``/``response_item_id``
-        on tool_calls) that strict chat-completions providers reject with 400/422.
+        ``codex_message_items`` on the message, ``call_id``/``response_item_id`` /
+        ``extra_content`` on tool_calls) that strict chat-completions providers
+        reject with 400/422.
         """
         needs_sanitize = False
         for msg in messages:
@@ -126,7 +127,8 @@ class ChatCompletionsTransport(ProviderTransport):
             tool_calls = msg.get("tool_calls")
             if isinstance(tool_calls, list):
                 for tc in tool_calls:
-                    if isinstance(tc, dict) and ("call_id" in tc or "response_item_id" in tc):
+                    if isinstance(tc, dict) and ("call_id" in tc or "response_item_id" in tc
+                                               or "extra_content" in tc):
                         needs_sanitize = True
                         break
                 if needs_sanitize:
@@ -147,6 +149,7 @@ class ChatCompletionsTransport(ProviderTransport):
                     if isinstance(tc, dict):
                         tc.pop("call_id", None)
                         tc.pop("response_item_id", None)
+                        tc.pop("extra_content", None)
         return sanitized
 
     def convert_tools(self, tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

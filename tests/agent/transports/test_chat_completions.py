@@ -46,6 +46,24 @@ class TestChatCompletionsBasic:
         assert "codex_reasoning_items" in msgs[0]
         assert "codex_message_items" in msgs[0]
 
+    def test_convert_messages_strips_extra_content_from_tool_calls(self, transport):
+        """Strict providers like Fireworks reject extra_content on tool_calls with 400.
+
+        Gemini 3 thinking models attach extra_content (thought_signature) to
+        tool_calls for replay.  The agent loop writes it into the assistant
+        message; this transport must strip it before sending to strict APIs.
+        """
+        msgs = [
+            {"role": "assistant", "content": "ok",
+             "tool_calls": [{"id": "call_1", "type": "function",
+                             "extra_content": {"google": {"thought_signature": "SIG_123"}},
+                             "function": {"name": "t", "arguments": "{}"}}]},
+        ]
+        result = transport.convert_messages(msgs)
+        assert "extra_content" not in result[0]["tool_calls"][0]
+        # Original list untouched (deepcopy-on-demand)
+        assert "extra_content" in msgs[0]["tool_calls"][0]
+
 
 class TestChatCompletionsBuildKwargs:
 
