@@ -257,7 +257,7 @@ TOOL_USE_ENFORCEMENT_GUIDANCE = (
 
 # Model name substrings that trigger tool-use enforcement guidance.
 # Add new patterns here when a model family needs explicit steering.
-TOOL_USE_ENFORCEMENT_MODELS = ("gpt", "codex", "gemini", "gemma", "grok")
+TOOL_USE_ENFORCEMENT_MODELS = ("gpt", "codex", "gemini", "gemma", "grok", "mimo")
 
 # OpenAI GPT/Codex-specific execution guidance.  Addresses known failure modes
 # where GPT models abandon work on partial results, skip prerequisite lookups,
@@ -343,6 +343,40 @@ GOOGLE_MODEL_OPERATIONAL_GUIDANCE = (
     "to prevent CLI tools from hanging on prompts.\n"
     "- **Keep going:** Work autonomously until the task is fully resolved. "
     "Don't stop with a plan — execute it.\n"
+)
+
+# MiMo-specific execution guidance.
+# Addresses MiMo's tendency to skip skill loading and fabricate facts.
+MIMO_MODEL_EXECUTION_GUIDANCE = (
+    "# Execution discipline for MiMo\n"
+    "<mandatory_skill_loading>\n"
+    "When skills are listed in the system prompt, you MUST load them via skill_view() "
+    "before proceeding. Do not answer from memory when a relevant skill exists. "
+    "Skills contain verified rules and procedures — ignoring them leads to errors.\n"
+    "</mandatory_skill_loading>\n"
+    "\n"
+    "<verification_before_response>\n"
+    "Before finalizing any response that contains:\n"
+    "- Prices, costs, or financial figures\n"
+    "- Product capabilities or specifications\n"
+    "- Technical configurations or API details\n"
+    "- Model comparisons or benchmark numbers\n"
+    "You MUST verify from official sources using web_search, web_extract, or "
+    "direct API calls. If you cannot verify, explicitly say so.\n"
+    "</verification_before_response>\n"
+    "\n"
+    "<anti_hallucination>\n"
+    "- NEVER fabricate numbers, prices, or specifications\n"
+    "- NEVER assume product capabilities without verification\n"
+    "- When corrected, verify the correction before accepting it\n"
+    "- Label unverified claims clearly as \"unverified\"\n"
+    "</anti_hallucination>\n"
+    "\n"
+    "<tool_persistence>\n"
+    "- Use tools whenever they improve correctness or completeness\n"
+    "- Do not stop early when another tool call would improve the result\n"
+    "- Keep working until the task is complete AND verified\n"
+    "</tool_persistence>"
 )
 
 # Model name substrings that should use the 'developer' role instead of

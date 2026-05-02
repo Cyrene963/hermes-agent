@@ -149,7 +149,7 @@ from agent.model_metadata import (
 from agent.context_compressor import ContextCompressor
 from agent.subdirectory_hints import SubdirectoryHintTracker
 from agent.prompt_caching import apply_anthropic_cache_control
-from agent.prompt_builder import build_skills_system_prompt, build_skills_system_prompt_semantic, build_context_files_prompt, build_environment_hints, load_soul_md, TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS, GOOGLE_MODEL_OPERATIONAL_GUIDANCE, OPENAI_MODEL_EXECUTION_GUIDANCE
+from agent.prompt_builder import build_skills_system_prompt, build_skills_system_prompt_semantic, build_context_files_prompt, build_environment_hints, load_soul_md, TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS, GOOGLE_MODEL_OPERATIONAL_GUIDANCE, OPENAI_MODEL_EXECUTION_GUIDANCE, MIMO_MODEL_EXECUTION_GUIDANCE
 from agent.usage_pricing import estimate_usage_cost, normalize_usage
 from agent.codex_responses_adapter import (
     _derive_responses_function_call_id as _codex_derive_responses_function_call_id,
@@ -1853,6 +1853,24 @@ class AIAgent:
         if not isinstance(_agent_section, dict):
             _agent_section = {}
         self._tool_use_enforcement = _agent_section.get("tool_use_enforcement", "auto")
+
+        # Mandatory skills: skills that must be loaded before responding.
+        # Config: agent.mandatory_skills (list of skill names)
+        _mandatory_skills = _agent_section.get("mandatory_skills", [])
+        if isinstance(_mandatory_skills, list):
+            self._mandatory_skills = [s for s in _mandatory_skills if isinstance(s, str)]
+        else:
+            self._mandatory_skills = []
+
+        # Skill enforcement: verify response against loaded skills.
+        # Config: agent.skill_enforcement.enabled (bool), agent.skill_enforcement.mode (warn|block)
+        _skill_enforcement = _agent_section.get("skill_enforcement", {})
+        if isinstance(_skill_enforcement, dict):
+            self._skill_enforcement_enabled = _skill_enforcement.get("enabled", False)
+            self._skill_enforcement_mode = _skill_enforcement.get("mode", "warn")
+        else:
+            self._skill_enforcement_enabled = False
+            self._skill_enforcement_mode = "warn"
 
         # App-level API retry count (wraps each model API call).  Default 3,
         # overridable via agent.api_max_retries in config.yaml.  See #11616.
@@ -5046,6 +5064,10 @@ class AIAgent:
                 # prerequisite checks, verification, anti-hallucination).
                 if "gpt" in _model_lower or "codex" in _model_lower:
                     prompt_parts.append(OPENAI_MODEL_EXECUTION_GUIDANCE)
+                # MiMo-specific execution discipline (skill enforcement,
+                # anti-hallucination, verification before response).
+                if "mimo" in _model_lower:
+                    prompt_parts.append(MIMO_MODEL_EXECUTION_GUIDANCE)
 
         # so it can refer the user to them rather than reinventing answers.
 
@@ -5113,6 +5135,28 @@ class AIAgent:
             skills_prompt = ""
         if skills_prompt:
             prompt_parts.append(skills_prompt)
+
+        # Inject mandatory skills prompt if configured.
+        # These skills MUST be loaded before responding to any factual question.
+        if self._mandatory_skills and has_skills_tools:
+            mandatory_skills_list = ", ".join(self._mandatory_skills)
+            mandatory_skills_prompt = (
+                f"## Mandatory Skills (must load before factual responses)\n"
+                f"The following skills are MANDATORY and must be loaded via skill_view() "
+                f"before any response containing factual claims, prices, specifications, "
+                f"or technical details: {mandatory_skills_list}\n"
+                f"\n"
+                f"When responding to questions about:\n"
+                f"- Prices, costs, or financial figures\n"
+                f"- Product capabilities or specifications\n"
+                f"- Technical configurations or API details\n"
+                f"- Model comparisons or benchmark numbers\n"
+                f"You MUST first call skill_view() for each relevant mandatory skill, "
+                f"then follow the verification rules in that skill.\n"
+                f"Failure to load mandatory skills before factual responses is a violation "
+                f"of this instruction.\n"
+            )
+            prompt_parts.append(mandatory_skills_prompt)
 
         if not self.skip_context_files:
             # Use TERMINAL_CWD for context file discovery when set (gateway
@@ -10642,6 +10686,45 @@ class AIAgent:
 
         return final_response
 
+    def _verify_skill_compliance(self, response: str, loaded_skills: list[str]) -> list[str]:
+        """Check if response violates rules from loaded skills.
+        
+        Returns a list of violations. Empty list means compliant.
+        """
+        violations = []
+        response_lower = response.lower()
+        
+        # Check precision-and-verification rules
+        if 'precision-and-verification' in loaded_skills:
+            # Check for unverified price claims (common hallucination pattern)
+            price_patterns = [
+                r'¥\d+', r'\$\d+', r'€\d+',  # Currency amounts
+                r'每[月天年]\d+', r'每月', r'每年',  # Chinese price patterns
+                r'元/[月天年]', r'美元', r'人民币',
+            ]
+            import re
+            for pattern in price_patterns:
+                if re.search(pattern, response):
+                    # Check if response mentions verification source
+                    verification_indicators = ['官方', 'official', '文档', 'website', 'website', '网站', '查询', 'verified', 'confirmed']
+                    if not any(indicator in response_lower for indicator in verification_indicators):
+                        violations.append(f"precision-and-verification: price claim without verification source")
+                        break
+        
+        # Check investigate-before-act rules
+        if 'investigate-before-act' in loaded_skills:
+            # Check for claims about server/system specs without tool calls
+            spec_patterns = ['cpu', 'memory', '内存', '磁盘', 'disk', '服务器', 'server', '配置']
+            if any(pattern in response_lower for pattern in spec_patterns):
+                # Check if this looks like a factual claim about current state
+                claim_indicators = ['是', '为', '有', '使用', 'running', 'is', 'has']
+                if any(indicator in response_lower for indicator in claim_indicators):
+                    # This is a potential unverified claim - check if tools were used
+                    # (We can't know for sure here, but we can warn)
+                    pass  # The warning is handled by the mandatory skills prompt
+        
+        return violations
+    
     def run_conversation(
         self,
         user_message: str,
