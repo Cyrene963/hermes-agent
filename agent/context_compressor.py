@@ -43,11 +43,22 @@ SUMMARY_PREFIX = (
     "they were already addressed. "
     "Your current task is identified in the '## Active Task' section of the "
     "summary — resume exactly from there. "
+    "IMPORTANT: Your persistent memory (MEMORY.md, USER.md) in the system "
+    "prompt is ALWAYS authoritative and active — never ignore or deprioritize "
+    "memory content due to this compaction note. "
     "Respond ONLY to the latest user message "
     "that appears AFTER this summary. The current session state (files, "
     "config, etc.) may reflect work described here — avoid repeating it:"
 )
 LEGACY_SUMMARY_PREFIX = "[CONTEXT SUMMARY]:"
+
+# Sentinel appended to the system prompt the first time a session is
+# compacted. Detection of this string in messages[0] tells subsequent
+# compactions "this is a re-compaction" — see
+# ``ContextCompressor._is_recompaction``. (issue #17344)
+_COMPRESSION_NOTE_SENTINEL = (
+    "earlier conversation turns have been compacted into a handoff summary"
+)
 
 # Minimum tokens for the summary output
 _MIN_SUMMARY_TOKENS = 2000
@@ -1217,6 +1228,26 @@ The user has requested that this compaction PRIORITISE preserving all informatio
     # ContextEngine: manual /compress preflight
     # ------------------------------------------------------------------
 
+    def _is_recompaction(self, messages: List[Dict[str, Any]]) -> bool:
+        """True when ``messages[0]`` is a system prompt that already carries
+        our compaction note — i.e. this is at least the second compaction
+        in this session's lifetime.
+
+        Used by :meth:`compress` to shrink ``protect_first_n`` so the
+        stale first user exchange isn't re-anchored across every cycle.
+        See issue #17344.
+        """
+        if not messages:
+            return False
+        first = messages[0]
+        if not isinstance(first, dict) or first.get("role") != "system":
+            return False
+        try:
+            text = _content_text_for_contains(first.get("content"))
+        except Exception:
+            return False
+        return _COMPRESSION_NOTE_SENTINEL in (text or "")
+
     def has_content_to_compress(self, messages: List[Dict[str, Any]]) -> bool:
         """Return True if there is a non-empty middle region to compact.
 
@@ -1259,8 +1290,26 @@ The user has requested that this compaction PRIORITISE preserving all informatio
         self._last_aux_model_failure_error = None
         self._last_aux_model_failure_model = None
         n_messages = len(messages)
+        # Recompaction detection (#17344): if the system prompt already
+        # carries our compaction note from a previous run, the original
+        # ``[user1, assistant1]`` exchange is no longer a meaningful head
+        # — it just anchors a stale request the model keeps trying to
+        # re-execute on every cycle. Drop ``protect_first_n`` to 1 (system
+        # only) so the old first exchange flows into the summariser pool
+        # alongside everything else, where the structured ``## Active
+        # Task`` framing replaces it as the steering signal.
+        effective_protect_first_n = self.protect_first_n
+        if self._is_recompaction(messages) and self.protect_first_n > 1:
+            effective_protect_first_n = 1
+            if not self.quiet_mode:
+                logger.info(
+                    "Recompaction detected (system has prior compaction note); "
+                    "shrinking protect_first_n %d -> 1 so the stale first exchange "
+                    "is summarised instead of re-anchored (#17344)",
+                    self.protect_first_n,
+                )
         # Only need head + 3 tail messages minimum (token budget decides the real tail size)
-        _min_for_compress = self.protect_first_n + 3 + 1
+        _min_for_compress = effective_protect_first_n + 3 + 1
         if n_messages <= _min_for_compress:
             if not self.quiet_mode:
                 logger.warning(
@@ -1280,7 +1329,7 @@ The user has requested that this compaction PRIORITISE preserving all informatio
             logger.info("Pre-compression: pruned %d old tool result(s)", pruned_count)
 
         # Phase 2: Determine boundaries
-        compress_start = self.protect_first_n
+        compress_start = effective_protect_first_n
         compress_start = self._align_boundary_forward(messages, compress_start)
 
         # Use token-budget tail protection instead of fixed message count
@@ -1322,7 +1371,7 @@ The user has requested that this compaction PRIORITISE preserving all informatio
             msg = messages[i].copy()
             if i == 0 and msg.get("role") == "system":
                 existing = msg.get("content")
-                _compression_note = "[Note: Some earlier conversation turns have been compacted into a handoff summary to preserve context space. The current session state may still reflect earlier work, so build on that summary and state rather than re-doing work.]"
+                _compression_note = "[Note: Some earlier conversation turns have been compacted into a handoff summary to preserve context space. The current session state may still reflect earlier work, so build on that summary and state rather than re-doing work. Your persistent memory (MEMORY.md, USER.md) remains fully authoritative regardless of compaction.]"
                 if _compression_note not in _content_text_for_contains(existing):
                     msg["content"] = _append_text_to_content(
                         existing,
