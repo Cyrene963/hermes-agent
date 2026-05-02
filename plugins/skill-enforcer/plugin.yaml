@@ -1,0 +1,6 @@
+name: skill-enforcer
+version: 1.0.0
+description: "Force skill loading before action tools. Blocks first action tool call if no skill_view/hindsight_recall/session_search has been called in the session."
+author: "Hermes Agent"
+hooks:
+  - pre_tool_call
