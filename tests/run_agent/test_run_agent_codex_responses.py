@@ -1403,6 +1403,154 @@ def test_dump_api_request_debug_uses_chat_completions_url(monkeypatch, tmp_path)
     assert payload["request"]["url"] == "http://127.0.0.1:9208/v1/chat/completions"
 
 
+# ---------------------------------------------------------------------------
+# Credential redaction in request dumps (#18707) — security/P1
+#
+# request_dump_*.json files are written under ~/.hermes/sessions/ and are the
+# most likely files an operator will share when reporting a bug. Any path that
+# can carry a key — Authorization header, body messages, error.body,
+# error.response_text — must be scrubbed before write so the file is safe to
+# attach to a GitHub issue or paste into a support thread.
+# ---------------------------------------------------------------------------
+
+
+def _build_dump_agent(monkeypatch, tmp_path, *, api_key="sk-proj-FAKEABCDEFGHIJKLMNOPQRSTUVWXYZ012345"):
+    _patch_agent_bootstrap(monkeypatch)
+    agent = run_agent.AIAgent(
+        model="gpt-4o",
+        base_url="https://api.openai.com/v1",
+        api_key=api_key,
+        quiet_mode=True,
+        max_iterations=1,
+        skip_context_files=True,
+        skip_memory=True,
+    )
+    agent.logs_dir = tmp_path
+    return agent
+
+
+def test_dump_redacts_sk_proj_key_in_authorization_header(monkeypatch, tmp_path):
+    """The Authorization header must not expose any portion of an sk-... key."""
+    import json
+    fake_key = "sk-proj-FAKEABCDEFGHIJKLMNOPQRSTUVWXYZ012345"
+    agent = _build_dump_agent(monkeypatch, tmp_path, api_key=fake_key)
+    agent.client.api_key = fake_key
+
+    dump_file = agent._dump_api_request_debug(
+        {"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]},
+        reason="preflight",
+    )
+
+    raw = dump_file.read_text()
+    # No prefix, suffix, or contiguous middle of the key may appear.
+    assert "sk-proj-FAKE" not in raw
+    assert fake_key[-8:] not in raw
+    payload = json.loads(raw)
+    auth_header = payload["request"]["headers"].get("Authorization", "")
+    assert "sk-proj" not in auth_header
+
+
+def test_dump_redacts_keys_embedded_in_request_body(monkeypatch, tmp_path):
+    """A user message that contains a leaked key must be scrubbed before write."""
+    leaked = "sk-proj-LEAKEDXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+    agent = _build_dump_agent(monkeypatch, tmp_path)
+    agent.client.api_key = "sk-test-CLIENTKEYABCDEFGHIJKLMNOPQ"
+
+    api_kwargs = {
+        "model": "gpt-4o",
+        "messages": [
+            {"role": "user", "content": f"please debug this: OPENAI_API_KEY={leaked}"},
+        ],
+    }
+    dump_file = agent._dump_api_request_debug(api_kwargs, reason="preflight")
+
+    raw = dump_file.read_text()
+    assert leaked not in raw
+    assert "sk-proj-LEAKED" not in raw
+
+
+def test_dump_remains_valid_json_after_redaction(monkeypatch, tmp_path):
+    """The dump file must always parse as JSON.
+
+    Regression: applying the text-level redactor to already-serialised JSON
+    let the env-assignment regex (\\S+ value group) consume past the JSON
+    string's closing quote, producing files that crashed json.loads. Redact
+    string values before serialisation so the JSON structure is never
+    touched by regex substitution.
+    """
+    import json as _json
+    leaked = "sk-proj-LEAKEDXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+    agent = _build_dump_agent(monkeypatch, tmp_path)
+    agent.client.api_key = "sk-test-CLIENTKEYABCDEFGHIJKLMNOPQ"
+
+    api_kwargs = {
+        "model": "gpt-4o",
+        "messages": [
+            {"role": "user", "content": f"please debug this: OPENAI_API_KEY={leaked}"},
+            {"role": "assistant", "content": "ok"},
+        ],
+        "tools": [{"type": "function", "function": {"name": "x"}}],
+    }
+    dump_file = agent._dump_api_request_debug(api_kwargs, reason="preflight")
+
+    raw = dump_file.read_text()
+    parsed = _json.loads(raw)  # must not raise
+    # Structure must be preserved after redaction.
+    assert parsed["request"]["body"]["model"] == "gpt-4o"
+    assert len(parsed["request"]["body"]["messages"]) == 2
+    assert parsed["request"]["body"]["messages"][1]["content"] == "ok"
+    # Secret still scrubbed.
+    assert leaked not in raw
+
+
+def test_dump_redacts_keys_in_error_response_text(monkeypatch, tmp_path):
+    """Error responses can echo back keys; the dump must scrub error.response_text."""
+    leaked = "sk-proj-ECHOEDBACKABCDEFGHIJKLMNOPQRSTUVWX"
+    agent = _build_dump_agent(monkeypatch, tmp_path)
+    agent.client.api_key = "sk-test-CLIENTKEYABCDEFGHIJKLMNOPQ"
+
+    response_obj = SimpleNamespace(
+        status_code=401,
+        text=f'{{"error": {{"message": "Invalid API key sk-proj-ECHOEDBACKABCDEFGHIJKLMNOPQRSTUVWX"}}}}',
+    )
+    err = RuntimeError("auth failure")
+    err.status_code = 401
+    err.body = {"raw_authorization": leaked}
+    err.response = response_obj
+
+    dump_file = agent._dump_api_request_debug(
+        {"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]},
+        reason="bad-key",
+        error=err,
+    )
+
+    raw = dump_file.read_text()
+    assert leaked not in raw
+
+
+def test_dump_preserves_non_secret_metadata(monkeypatch, tmp_path):
+    """Redaction must not strip benign fields needed for debugging."""
+    import json
+    agent = _build_dump_agent(monkeypatch, tmp_path)
+    agent.client.api_key = "sk-test-CLIENTKEYABCDEFGHIJKLMNOPQ"
+
+    err = RuntimeError("provider is down")
+    err.status_code = 503
+
+    dump_file = agent._dump_api_request_debug(
+        {"model": "gpt-4o", "messages": [{"role": "user", "content": "hello"}]},
+        reason="server-error",
+        error=err,
+    )
+
+    payload = json.loads(dump_file.read_text())
+    assert payload["reason"] == "server-error"
+    assert payload["request"]["method"] == "POST"
+    assert payload["request"]["url"].startswith("https://api.openai.com/v1/")
+    assert payload["error"]["type"] == "RuntimeError"
+    assert payload["error"]["status_code"] == 503
+
+
 # --- Reasoning-only response tests (fix for empty content retry loop) ---
 
 

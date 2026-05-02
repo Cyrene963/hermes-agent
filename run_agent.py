@@ -4209,12 +4209,10 @@ class AIAgent:
             body.pop("timeout", None)
             body = {k: v for k, v in body.items() if v is not None}
 
-            api_key = None
-            try:
-                api_key = getattr(self.client, "api_key", None)
-            except Exception as e:
-                logger.debug("Could not extract API key for debug dump: %s", e)
-
+            # Dump files end up in bug reports, support tarballs, and shared
+            # backups (#18707). Even the prefix of an API key is unsafe to
+            # emit in a writeable artifact, so the Authorization header is
+            # hard-coded to a placeholder rather than read from self.client.
             dump_payload: Dict[str, Any] = {
                 "timestamp": datetime.now().isoformat(),
                 "session_id": self.session_id,
@@ -4223,7 +4221,7 @@ class AIAgent:
                     "method": "POST",
                     "url": f"{self.base_url.rstrip('/')}{'/responses' if self.api_mode == 'codex_responses' else '/chat/completions'}",
                     "headers": {
-                        "Authorization": f"Bearer {self._mask_api_key_for_logs(api_key)}",
+                        "Authorization": "Bearer ***",
                         "Content-Type": "application/json",
                     },
                     "body": body,
@@ -4254,17 +4252,40 @@ class AIAgent:
 
                 dump_payload["error"] = error_info
 
+            # Scrub each string value before serialisation: messages, tool
+            # outputs, and provider error bodies can echo back keys that the
+            # user pasted or the provider quoted. Walking the structure (not
+            # the serialised text) keeps the redactor's regexes — especially
+            # _ENV_ASSIGN_RE's greedy \\S+ value group — bounded to a single
+            # JSON string, so it can never run past a closing quote and
+            # corrupt the file. force=True because this is a security
+            # boundary, not a logging preference.
+            from agent.redact import redact_sensitive_text
+
+            def _scrub(obj):
+                if isinstance(obj, str):
+                    return redact_sensitive_text(obj, force=True)
+                if isinstance(obj, dict):
+                    return {k: _scrub(v) for k, v in obj.items()}
+                if isinstance(obj, list):
+                    return [_scrub(v) for v in obj]
+                if isinstance(obj, tuple):
+                    return tuple(_scrub(v) for v in obj)
+                return obj
+
+            scrubbed_payload = _scrub(dump_payload)
+            serialized = json.dumps(
+                scrubbed_payload, ensure_ascii=False, indent=2, default=str
+            )
+
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
             dump_file = self.logs_dir / f"request_dump_{self.session_id}_{timestamp}.json"
-            dump_file.write_text(
-                json.dumps(dump_payload, ensure_ascii=False, indent=2, default=str),
-                encoding="utf-8",
-            )
+            dump_file.write_text(serialized, encoding="utf-8")
 
             self._vprint(f"{self.log_prefix}🧾 Request debug dump written to: {dump_file}")
 
             if env_var_enabled("HERMES_DUMP_REQUEST_STDOUT"):
-                print(json.dumps(dump_payload, ensure_ascii=False, indent=2, default=str))
+                print(serialized)
 
             return dump_file
         except Exception as dump_error:
