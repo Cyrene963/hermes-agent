@@ -2278,7 +2278,7 @@ class AIAgent:
         except Exception as err:
             logger.debug("LM Studio preload skipped: %s", err)
 
-    def switch_model(self, new_model, new_provider, api_key='', base_url='', api_mode=''):
+    def switch_model(self, new_model, new_provider, api_key='', base_url='', api_mode='', credential_pool=None):
         """Switch the model/provider in-place for a live agent.
 
         Called by the /model command handlers (CLI and gateway) after
@@ -2324,6 +2324,15 @@ class AIAgent:
             self._transport_cache.clear()
         if api_key:
             self.api_key = api_key
+
+        # ── Swap credential pool if provided ──
+        # The /model pipeline resolves pools via load_pool() but the result
+        # was historically lost in the ModelSwitchResult → session-override
+        # chain.  Callers that resolve the pool themselves can now pass it
+        # through so the agent can rotate on 429/402 after a mid-session
+        # model switch.
+        if credential_pool is not None:
+            self._credential_pool = credential_pool
 
         # ── Build new client ──
         if api_mode == "anthropic_messages":

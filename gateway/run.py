@@ -1441,7 +1441,23 @@ class GatewayRunner:
                 "base_url": override.get("base_url"),
                 "api_mode": override.get("api_mode"),
             }
+            # Carry credential_pool from override if stored (new behavior)
+            if override.get("credential_pool") is not None:
+                override_runtime["credential_pool"] = override["credential_pool"]
             if override_runtime.get("api_key"):
+                # Credential pool fix: /model stores api_key but may lack
+                # credential_pool (ModelSwitchResult has no such field).
+                # When the provider is a pool name (e.g. "custom:mimo-sgp-friend"),
+                # resolve the pool here so the agent can rotate on 429/402.
+                _prov = override.get("provider", "")
+                if _prov.startswith("custom:") and "credential_pool" not in override_runtime:
+                    try:
+                        from agent.credential_pool import load_pool
+                        _pool = load_pool(_prov)
+                        if _pool and _pool.has_credentials():
+                            override_runtime["credential_pool"] = _pool
+                    except Exception:
+                        pass
                 logger.debug(
                     "Session model override (fast): session=%s config_model=%s -> override_model=%s provider=%s",
                     resolved_session_key or "", model, override_model,
@@ -7524,6 +7540,19 @@ class GatewayRunner:
             with _cache_lock:
                 cached_entry = _cache.get(session_key)
 
+        # Resolve credential pool for the target provider so the agent can
+        # rotate keys on 429/402 after a /model switch.
+        _resolved_pool = None
+        _prov = result.target_provider
+        if _prov.startswith("custom:"):
+            try:
+                from agent.credential_pool import load_pool
+                _p = load_pool(_prov)
+                if _p and _p.has_credentials():
+                    _resolved_pool = _p
+            except Exception:
+                pass
+
         if cached_entry and cached_entry[0] is not None:
             try:
                 cached_entry[0].switch_model(
@@ -7532,6 +7561,7 @@ class GatewayRunner:
                     api_key=result.api_key,
                     base_url=result.base_url,
                     api_mode=result.api_mode,
+                    credential_pool=_resolved_pool,
                 )
             except Exception as exc:
                 logger.warning("In-place model switch failed for cached agent: %s", exc)
@@ -7553,6 +7583,7 @@ class GatewayRunner:
             "api_key": result.api_key,
             "base_url": result.base_url,
             "api_mode": result.api_mode,
+            "credential_pool": _resolved_pool,
         }
 
         # Evict cached agent so the next turn creates a fresh agent from the
