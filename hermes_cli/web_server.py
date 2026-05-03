@@ -1356,7 +1356,7 @@ def _anthropic_oauth_status() -> Dict[str, Any]:
             "has_refresh_token": bool(cc_creds.get("refreshToken")),
         }
 
-    env_token = os.getenv("ANTHROPIC_TOKEN") or os.getenv("CLAUDE_CODE_OAUTH_TOKEN")
+    env_token = os.getenv("ANTHROPIC_TOKEN")
     if env_token:
         return {
             "logged_in": True,
