@@ -23,7 +23,10 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
-from typing import List, NamedTuple, Optional
+from typing import TYPE_CHECKING, List, NamedTuple, Optional
+
+if TYPE_CHECKING:
+    from agent.credential_pool import CredentialPool
 
 from hermes_cli.providers import (
     custom_provider_slug,
@@ -246,6 +249,10 @@ class ModelSwitchResult:
     capabilities: Optional[ModelCapabilities] = None
     model_info: Optional[ModelInfo] = None
     is_global: bool = False
+    # CredentialPool for the resolved target provider, when one was loaded.
+    # Callers must propagate this into runtime kwargs / session overrides so
+    # per-provider 429 rotation continues to work after a /model switch.
+    credential_pool: Optional["CredentialPool"] = None
 
 
 @dataclass
@@ -818,6 +825,7 @@ def switch_model(
     api_key = current_api_key
     base_url = current_base_url
     api_mode = ""
+    _resolved_pool = None
 
     if provider_changed or explicit_provider:
         try:
@@ -828,6 +836,7 @@ def switch_model(
             api_key = runtime.get("api_key", "")
             base_url = runtime.get("base_url", "")
             api_mode = runtime.get("api_mode", "")
+            _resolved_pool = runtime.get("credential_pool")
         except Exception as e:
             return ModelSwitchResult(
                 success=False,
@@ -853,6 +862,7 @@ def switch_model(
                 api_key = runtime.get("api_key", "")
                 base_url = runtime.get("base_url", "")
                 api_mode = runtime.get("api_mode", "")
+                _resolved_pool = runtime.get("credential_pool")
         except Exception:
             pass
 
@@ -978,6 +988,7 @@ def switch_model(
         capabilities=capabilities,
         model_info=model_info,
         is_global=is_global,
+        credential_pool=_resolved_pool,
     )
 
 

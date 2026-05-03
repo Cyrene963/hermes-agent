@@ -959,7 +959,8 @@ class GatewayRunner:
     _restart_detached: bool = False
     _restart_via_service: bool = False
     _stop_task: Optional[asyncio.Task] = None
-    _session_model_overrides: Dict[str, Dict[str, str]] = {}
+    # Values are mostly str but credential_pool is a CredentialPool instance.
+    _session_model_overrides: Dict[str, Dict[str, Any]] = {}
     _session_reasoning_overrides: Dict[str, Dict[str, Any]] = {}
     # Stale-code self-check defaults (see _detect_stale_code()).  Class-level
     # so tests that construct GatewayRunner via ``object.__new__`` without
@@ -1058,7 +1059,7 @@ class GatewayRunner:
 
         # Per-session model overrides from /model command.
         # Key: session_key, Value: dict with model/provider/api_key/base_url/api_mode
-        self._session_model_overrides: Dict[str, Dict[str, str]] = {}
+        self._session_model_overrides: Dict[str, Dict[str, Any]] = {}
         # Per-session reasoning effort overrides from /reasoning.
         # Key: session_key, Value: parsed reasoning config dict.
         self._session_reasoning_overrides: Dict[str, Dict[str, Any]] = {}
@@ -7540,19 +7541,6 @@ class GatewayRunner:
             with _cache_lock:
                 cached_entry = _cache.get(session_key)
 
-        # Resolve credential pool for the target provider so the agent can
-        # rotate keys on 429/402 after a /model switch.
-        _resolved_pool = None
-        _prov = result.target_provider
-        if _prov.startswith("custom:"):
-            try:
-                from agent.credential_pool import load_pool
-                _p = load_pool(_prov)
-                if _p and _p.has_credentials():
-                    _resolved_pool = _p
-            except Exception:
-                pass
-
         if cached_entry and cached_entry[0] is not None:
             try:
                 cached_entry[0].switch_model(
@@ -7561,7 +7549,7 @@ class GatewayRunner:
                     api_key=result.api_key,
                     base_url=result.base_url,
                     api_mode=result.api_mode,
-                    credential_pool=_resolved_pool,
+                    credential_pool=result.credential_pool,
                 )
             except Exception as exc:
                 logger.warning("In-place model switch failed for cached agent: %s", exc)
@@ -7583,7 +7571,7 @@ class GatewayRunner:
             "api_key": result.api_key,
             "base_url": result.base_url,
             "api_mode": result.api_mode,
-            "credential_pool": _resolved_pool,
+            "credential_pool": result.credential_pool,
         }
 
         # Evict cached agent so the next turn creates a fresh agent from the

@@ -5475,27 +5475,15 @@ class HermesCLI:
 
         if self.agent is not None:
             try:
-                # Resolve credential pool for the target provider so the
-                # agent can rotate keys on 429/402 after a /model switch.
-                _pool = None
-                _prov = result.target_provider
-                if _prov.startswith("custom:"):
-                    try:
-                        from agent.credential_pool import load_pool
-                        _p = load_pool(_prov)
-                        if _p and _p.has_credentials():
-                            _pool = _p
-                    except Exception:
-                        pass
-                if _pool is not None:
-                    self._credential_pool = _pool
+                if result.credential_pool is not None:
+                    self._credential_pool = result.credential_pool
                 self.agent.switch_model(
                     new_model=result.new_model,
                     new_provider=result.target_provider,
                     api_key=result.api_key,
                     base_url=result.base_url,
                     api_mode=result.api_mode,
-                    credential_pool=_pool,
+                    credential_pool=result.credential_pool,
                 )
             except Exception as exc:
                 _cprint(f"  ⚠ Agent swap failed ({exc}); change applied to next session.")
@@ -5714,27 +5702,15 @@ class HermesCLI:
         # Apply to running agent (in-place swap)
         if self.agent is not None:
             try:
-                # Resolve credential pool for the target provider so the
-                # agent can rotate keys on 429/402 after a /model switch.
-                _pool = None
-                _prov = result.target_provider
-                if _prov.startswith("custom:"):
-                    try:
-                        from agent.credential_pool import load_pool
-                        _p = load_pool(_prov)
-                        if _p and _p.has_credentials():
-                            _pool = _p
-                    except Exception:
-                        pass
-                if _pool is not None:
-                    self._credential_pool = _pool
+                if result.credential_pool is not None:
+                    self._credential_pool = result.credential_pool
                 self.agent.switch_model(
                     new_model=result.new_model,
                     new_provider=result.target_provider,
                     api_key=result.api_key,
                     base_url=result.base_url,
                     api_mode=result.api_mode,
-                    credential_pool=_pool,
+                    credential_pool=result.credential_pool,
                 )
             except Exception as exc:
                 _cprint(f"  ⚠ Agent swap failed ({exc}); change applied to next session.")
