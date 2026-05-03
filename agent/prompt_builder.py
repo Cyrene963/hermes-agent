@@ -243,6 +243,24 @@ KANBAN_GUIDANCE = (
     "cross-agent handoffs that outlive one API loop."
 )
 
+
+# Pre-flight thinking block -- injected at the VERY TOP of the system prompt
+# Forces the model to internally assess what it knows before generating a response.
+PRE_FLIGHT_THINKING_BLOCK = (
+    "# Pre-Flight Thinking (MANDATORY -- execute before every response)\n"
+    "Before generating ANY response, you MUST internally assess:\n"
+    "1. Do I already have relevant knowledge from memory, hindsight, or past sessions?\n"
+    "   -> If uncertain, call `hindsight_recall` with key terms from the user's message.\n"
+    "2. Have we discussed this topic before?\n"
+    "   -> If it feels familiar, call `session_search` to check.\n"
+    "3. Is there a skill that governs this type of task?\n"
+    "   -> If it involves facts, verification, or domain knowledge, call `skill_view`.\n"
+    "4. Am I about to state something I haven't verified?\n"
+    "   -> If yes, use tools to verify first. Never guess.\n\n"
+    "You have these tools for a reason -- use them proactively, not reactively.\n"
+    "A good response starts with knowing what you know, not with generating text.\n"
+)
+
 TOOL_USE_ENFORCEMENT_GUIDANCE = (
     "# Tool-use enforcement\n"
     "You MUST use your tools to take action — do not describe what you would do "
