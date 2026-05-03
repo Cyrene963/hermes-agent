@@ -1831,6 +1831,19 @@ class AIAgent:
             _api_retries = 3
         self._api_max_retries = _api_retries
 
+        # Auto-context retrieval: automatically search hindsight + session
+        # history before each API call and inject results into the prompt.
+        # This is semantic (hindsight uses embeddings), NOT keyword matching.
+        # Config: agent.auto_context.enabled (bool, default True)
+        #         agent.auto_context.session_limit (int, default 3)
+        _auto_ctx = _agent_section.get("auto_context", {})
+        if isinstance(_auto_ctx, dict):
+            self._auto_context_enabled = _auto_ctx.get("enabled", True)
+            self._auto_context_session_limit = int(_auto_ctx.get("session_limit", 3))
+        else:
+            self._auto_context_enabled = True
+            self._auto_context_session_limit = 3
+
         # Initialize context compressor for automatic context management
         # Compresses conversation when approaching model's context limit
         # Configuration via config.yaml (compression section)
@@ -10749,6 +10762,28 @@ class AIAgent:
             except Exception:
                 pass
 
+        # Auto-context: session search (hindsight is already prefetched above).
+        # This gives the model automatic access to relevant conversation history
+        # without needing to call session_search as a tool.
+        _auto_session_context = ""
+        if (self._session_db
+                and getattr(self, '_auto_context_enabled', True)
+                and isinstance(original_user_message, str)
+                and len(original_user_message.strip()) > 10):
+            try:
+                from tools.session_search_tool import session_search as _session_search
+                _ss_result = _session_search(
+                    query=original_user_message[:500],
+                    limit=getattr(self, '_auto_context_session_limit', 3),
+                    db=self._session_db,
+                    current_session_id=self.session_id,
+                    user_id=getattr(self, '_user_id', None),
+                )
+                if _ss_result and '"count": 0' not in _ss_result and '"count":0' not in _ss_result:
+                    _auto_session_context = _ss_result
+            except Exception as _ss_err:
+                logger.debug("Auto session_search failed (non-fatal): %s", _ss_err)
+
         while (api_call_count < self.max_iterations and self.iteration_budget.remaining > 0) or self._budget_grace_call:
             # Reset per-turn checkpoint dedup so each iteration can take one snapshot
             self._checkpoint_mgr.new_turn()
@@ -10887,18 +10922,32 @@ class AIAgent:
                 # with target="user_message" (the default).  Both are
                 # API-call-time only — the original message in `messages` is
                 # never mutated, so nothing leaks into session persistence.
+                # Auto-retrieved context (hindsight + session search) is injected
+                # as a SYSTEM message for maximum attention weight.
                 if idx == current_turn_user_idx and msg.get("role") == "user":
-                    _injections = []
+                    _auto_parts = []
                     if _ext_prefetch_cache:
                         _fenced = build_memory_context_block(_ext_prefetch_cache)
                         if _fenced:
-                            _injections.append(_fenced)
+                            _auto_parts.append(_fenced)
+                    if _auto_session_context:
+                        _auto_parts.append("[Relevant past sessions]\n" + _auto_session_context)
                     if _plugin_user_context:
-                        _injections.append(_plugin_user_context)
-                    if _injections:
-                        _base = api_msg.get("content", "")
-                        if isinstance(_base, str):
-                            api_msg["content"] = _base + "\n\n" + "\n\n".join(_injections)
+                        _auto_parts.append(_plugin_user_context)
+                    if _auto_parts:
+                        _auto_block = (
+                            "<auto_retrieved_context>\n"
+                            "The following context was automatically retrieved from your "
+                            "memory and session history. Use it to inform your response. "
+                            "Do NOT ignore this context.\n\n"
+                            + "\n\n".join(_auto_parts)
+                            + "\n</auto_retrieved_context>"
+                        )
+                        # Insert as system message BEFORE the user message
+                        api_messages.insert(len(api_messages) - 1, {
+                            "role": "system",
+                            "content": _auto_block,
+                        })
 
                 # For ALL assistant messages, pass reasoning back to the API
                 # This ensures multi-turn reasoning context is preserved
