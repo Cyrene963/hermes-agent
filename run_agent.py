@@ -1736,6 +1736,7 @@ class AIAgent:
         self._memory_nudge_interval = 10
         self._turns_since_memory = 0
         self._iters_since_skill = 0
+        self._skill_eval_done = False   # Skill Evaluation Gate: set True after first skill_view
         if not skip_memory:
             try:
                 mem_config = _agent_cfg.get("memory", {})
@@ -5135,6 +5136,12 @@ class AIAgent:
             skills_prompt = ""
         if skills_prompt:
             prompt_parts.append(skills_prompt)
+            # Skill Evaluation Gate: inject mandatory instruction after skill index
+            try:
+                from agent.skill_eval_gate import get_skill_eval_instruction
+                prompt_parts.append(get_skill_eval_instruction())
+            except ImportError:
+                pass
 
         # Inject mandatory skills prompt if configured.
         # These skills MUST be loaded before responding to any factual question.
@@ -9605,6 +9612,21 @@ class AIAgent:
                 )
             except Exception:
                 pass
+        # Skill Evaluation Gate: mark skill_view calls, block non-read tools
+        if block_message is None:
+            try:
+                from agent.skill_eval_gate import should_block_tool, is_skill_view_call
+                if is_skill_view_call(function_name):
+                    self._skill_eval_done = True
+                elif not self._skill_eval_done and should_block_tool(function_name):
+                    block_message = (
+                        "SKILL EVALUATION REQUIRED: Before executing this tool, you MUST "
+                        "evaluate the skill index in your system prompt and call skill_view() "
+                        "for any skills relevant to this task. If no skills match, call "
+                        "skill_view(name='hermes-agent') as a minimal acknowledgment and proceed."
+                    )
+            except ImportError:
+                pass
         if block_message is not None:
             return json.dumps({"error": block_message}, ensure_ascii=False)
 
@@ -10117,6 +10139,22 @@ class AIAgent:
                 )
             except Exception:
                 pass
+
+            # Skill Evaluation Gate: mark skill_view calls, block non-read tools
+            if _block_msg is None:
+                try:
+                    from agent.skill_eval_gate import should_block_tool, is_skill_view_call
+                    if is_skill_view_call(function_name):
+                        self._skill_eval_done = True
+                    elif not self._skill_eval_done and should_block_tool(function_name):
+                        _block_msg = (
+                            "SKILL EVALUATION REQUIRED: Before executing this tool, you MUST "
+                            "evaluate the skill index in your system prompt and call skill_view() "
+                            "for any skills relevant to this task. If no skills match, call "
+                            "skill_view(name='hermes-agent') as a minimal acknowledgment and proceed."
+                        )
+                except ImportError:
+                    pass
 
             _guardrail_block_decision: ToolGuardrailDecision | None = None
             if _block_msg is None:
@@ -10837,6 +10875,9 @@ class AIAgent:
         # They are initialized in __init__ and must persist across run_conversation
         # calls so that nudge logic accumulates correctly in CLI mode.
         self.iteration_budget = IterationBudget(self.max_iterations)
+        # Skill Evaluation Gate: reset per conversation so each new conversation
+        # requires skill evaluation (unlike nudge counters that persist).
+        self._skill_eval_done = False
 
         # Log conversation turn start for debugging/observability
         _preview_text = _summarize_user_message_for_log(user_message)
