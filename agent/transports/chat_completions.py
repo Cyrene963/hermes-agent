@@ -287,6 +287,11 @@ class ChatCompletionsTransport(ProviderTransport):
             api_kwargs.update(max_tokens_fn(32000))
         elif anthropic_max_out is not None:
             api_kwargs["max_tokens"] = anthropic_max_out
+        elif is_custom_provider and tools and max_tokens_fn:
+            # Custom proxies forwarding to Anthropic need max_tokens when
+            # tools are present — Anthropic's Messages API rejects requests
+            # without max_tokens when tool schemas are included (#19360).
+            api_kwargs.update(max_tokens_fn(4096))
 
         # Kimi: top-level reasoning_effort (unless thinking disabled)
         if is_kimi:
