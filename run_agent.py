@@ -2284,7 +2284,7 @@ class AIAgent:
         except Exception as err:
             logger.debug("LM Studio preload skipped: %s", err)
 
-    def switch_model(self, new_model, new_provider, api_key='', base_url='', api_mode=''):
+    def switch_model(self, new_model, new_provider, api_key='', base_url='', api_mode='', credential_pool=None):
         """Switch the model/provider in-place for a live agent.
 
         Called by the /model command handlers (CLI and gateway) after
@@ -2299,6 +2299,10 @@ class AIAgent:
         turn-scoped).
         """
         from hermes_cli.providers import determine_api_mode
+
+        # ── Preserve credential pool through model switch ──
+        if credential_pool is not None:
+            self._credential_pool = credential_pool
 
         # ── Determine api_mode if not provided ──
         if not api_mode:
