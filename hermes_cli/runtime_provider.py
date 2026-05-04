@@ -846,7 +846,7 @@ def _resolve_explicit_runtime(
 
         env_url = ""
         if pconfig.base_url_env_var:
-            env_url = get_env_value(pconfig.base_url_env_var, "").strip().rstrip("/")
+            env_url = (get_env_value(pconfig.base_url_env_var) or "").strip().rstrip("/")
 
         base_url = explicit_base_url
         if not base_url:
