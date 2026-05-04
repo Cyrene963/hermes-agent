@@ -5008,7 +5008,7 @@ class AIAgent:
                 with open(config_path, "r") as f:
                     _cfg = yaml.safe_load(f) or {}
                 _skills_cfg = _cfg.get("skills", {}) if isinstance(_cfg, dict) else {}
-                retrieval_mode = _skills_cfg.get("retrieval", "broadcast") if isinstance(_skills_cfg, dict) else "broadcast"
+                retrieval_mode = _skills_cfg.get("retrieval", "semantic") if isinstance(_skills_cfg, dict) else "semantic"
                 top_k = int(_skills_cfg.get("top_k", 15)) if isinstance(_skills_cfg, dict) else 15
             except Exception:
                 retrieval_mode = "broadcast"

@@ -363,6 +363,7 @@ def session_search(
     limit: int = 3,
     db=None,
     current_session_id: str = None,
+    user_id: str = None,
 ) -> str:
     """
     Search past sessions and return focused summaries of matching conversations.
@@ -386,7 +387,7 @@ def session_search(
     # Recent sessions mode: when query is empty, return metadata for recent sessions.
     # No LLM calls — just DB queries for titles, previews, timestamps.
     if not query or not query.strip():
-        return _list_recent_sessions(db, limit, current_session_id)
+        return _list_recent_sessions(db, limit, current_session_id, user_id=user_id)
 
     query = query.strip()
 
@@ -401,8 +402,9 @@ def session_search(
             query=query,
             role_filter=role_list,
             exclude_sources=list(_HIDDEN_SESSION_SOURCES),
-            limit=50,  # Get more matches to find unique sessions
+            limit=50,
             offset=0,
+            user_id=user_id,
         )
 
         if not raw_results:
@@ -626,7 +628,8 @@ registry.register(
         role_filter=args.get("role_filter"),
         limit=args.get("limit", 3),
         db=kw.get("db"),
-        current_session_id=kw.get("current_session_id")),
+        current_session_id=kw.get("current_session_id"),
+        user_id=kw.get("user_id")),
     check_fn=check_session_search_requirements,
     emoji="🔍",
 )
