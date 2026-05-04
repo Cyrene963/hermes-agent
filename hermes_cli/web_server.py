@@ -2898,7 +2898,7 @@ def _ws_client_is_allowed(ws: "WebSocket") -> bool:
         return True
     client_host = ws.client.host if ws.client else ""
     if not client_host:
-        return True
+        return False  # fail-closed: reject when client host is unknown
     return client_host in _LOOPBACK_HOSTS
 
 # Per-channel subscriber registry used by /api/pub (PTY-side gateway → dashboard)
