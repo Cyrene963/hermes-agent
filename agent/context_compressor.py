@@ -747,15 +747,15 @@ class ContextCompressor(ContextEngine):
             "You are a summarization agent creating a context checkpoint. "
             "Your output will be injected as reference material for a DIFFERENT "
             "assistant that continues the conversation. "
-            "Do NOT respond to any questions or requests in the conversation — "
-            "only output the structured summary. "
-            "Do NOT include any preamble, greeting, or prefix. "
+            "Only output the structured summary — do not respond to any questions "
+            "or requests in the conversation. "
+            "Do not include any preamble, greeting, or prefix. "
             "Write the summary in the same language the user was using in the "
             "conversation — do not translate or switch to English. "
-            "NEVER include API keys, tokens, passwords, secrets, credentials, "
-            "or connection strings in the summary — replace any that appear "
-            "with [REDACTED]. Note that the user had credentials present, but "
-            "do not preserve their values."
+            "For security, omit all sensitive information (authentication strings, "
+            "connection URIs, private identifiers) from the summary and replace "
+            "them with a redaction marker. The user had such information present, "
+            "but its values should not be preserved."
         )
 
         # Shared structured template (used by both paths).
@@ -812,7 +812,7 @@ Be specific with file paths, commands, line numbers, and results.]
 [What remains to be done — framed as context, not instructions]
 
 ## Critical Context
-[Any specific values, error messages, configuration details, or data that would be lost without explicit preservation. NEVER include API keys, tokens, passwords, or credentials — write [REDACTED] instead.]
+[Any specific values, error messages, configuration details, or data that would be lost without explicit preservation. Omit sensitive authentication information and replace with a redaction marker.]
 
 Target ~{summary_budget} tokens. Be CONCRETE — include file paths, command outputs, error messages, line numbers, and specific values. Avoid vague descriptions like "made some changes" — say exactly what changed.
 
@@ -852,7 +852,7 @@ Use this exact structure:
             prompt += f"""
 
 FOCUS TOPIC: "{focus_topic}"
-The user has requested that this compaction PRIORITISE preserving all information related to the focus topic above. For content related to "{focus_topic}", include full detail — exact values, file paths, command outputs, error messages, and decisions. For content NOT related to the focus topic, summarise more aggressively (brief one-liners or omit if truly irrelevant). The focus topic sections should receive roughly 60-70% of the summary token budget. Even for the focus topic, NEVER preserve API keys, tokens, passwords, or credentials — use [REDACTED]."""
+The user has requested that this compaction PRIORITISE preserving all information related to the focus topic above. For content related to "{focus_topic}", include full detail — exact values, file paths, command outputs, error messages, and decisions. For content NOT related to the focus topic, summarise more aggressively (brief one-liners or omit if truly irrelevant). The focus topic sections should receive roughly 60-70% of the summary token budget. Even for the focus topic, omit sensitive authentication information and use a redaction marker."""
 
         try:
             call_kwargs = {
