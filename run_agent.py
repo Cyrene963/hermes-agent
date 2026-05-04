@@ -4847,7 +4847,7 @@ class AIAgent:
 
 
 
-    def _build_system_prompt(self, system_message: str = None) -> str:
+    def _build_system_prompt(self, system_message: str = None, user_message: str = None) -> str:
         """
         Assemble the full system prompt from all layers.
         
@@ -5085,6 +5085,20 @@ class AIAgent:
                     prompt_parts.append(_entry.platform_hint)
             except Exception:
                 pass
+
+        # ── Skill auto-injection (Level 4 enforcement) ──
+        # Analyze the user's first message and inject matching skill content
+        # directly into the system prompt. No agent self-discipline required.
+        if user_message:
+            try:
+                from agent.skill_auto_inject import auto_inject_skills
+                from hermes_constants import get_hermes_home
+                skills_dir = get_hermes_home() / "skills"
+                skill_block = auto_inject_skills(user_message, skills_dir)
+                if skill_block:
+                    prompt_parts.append(skill_block)
+            except Exception as exc:
+                logger.debug("skill auto-injection failed: %s", exc)
 
         return "\n\n".join(p.strip() for p in prompt_parts if p.strip())
 
@@ -10668,7 +10682,10 @@ class AIAgent:
                 self._cached_system_prompt = stored_prompt
             else:
                 # First turn of a new session — build from scratch.
-                self._cached_system_prompt = self._build_system_prompt(system_message)
+                # Pass user_message for skill auto-injection (Level 4 enforcement).
+                self._cached_system_prompt = self._build_system_prompt(
+                    system_message, user_message=user_message
+                )
                 # Plugin hook: on_session_start
                 # Fired once when a brand-new session is created (not on
                 # continuation).  Plugins can use this to initialise
