@@ -1692,6 +1692,7 @@ class AIAgent:
         self._memory_nudge_interval = 10
         self._turns_since_memory = 0
         self._iters_since_skill = 0
+        self._skill_eval_done = False   # Skill Evaluation Gate: set True after first skill_view
         if not skip_memory:
             try:
                 mem_config = _agent_cfg.get("memory", {})
@@ -5030,6 +5031,16 @@ class AIAgent:
             skills_prompt = ""
         if skills_prompt:
             prompt_parts.append(skills_prompt)
+
+        # Inject skill evaluation gate instruction.
+        # Forces the agent to evaluate and load relevant skills before taking any action.
+        # This is code-level enforcement — NOT keyword matching.
+        if has_skills_tools:
+            try:
+                from agent.skill_eval_gate import get_skill_eval_instruction
+                prompt_parts.append(get_skill_eval_instruction())
+            except ImportError:
+                pass
 
         # Inject mandatory skills prompt if configured.
         # These skills MUST be loaded before responding to any factual question.
@@ -9413,6 +9424,23 @@ class AIAgent:
                 )
             except Exception:
                 pass
+
+            # ── Skill Evaluation Gate (sequential path) ─────────────────
+            if block_message is None:
+                try:
+                    from agent.skill_eval_gate import should_block_tool, is_skill_view_call
+                    if is_skill_view_call(function_name):
+                        self._skill_eval_done = True
+                    elif not self._skill_eval_done and should_block_tool(function_name):
+                        block_message = (
+                            "SKILL EVALUATION REQUIRED: Before executing this tool, you MUST "
+                            "evaluate the skill index in your system prompt and call skill_view() "
+                            "for any skills relevant to this task. If no skills match, call "
+                            "skill_view(name='hermes-agent') as a minimal acknowledgment and proceed."
+                        )
+                except ImportError:
+                    pass
+
         if block_message is not None:
             return json.dumps({"error": block_message}, ensure_ascii=False)
 
@@ -9567,6 +9595,24 @@ class AIAgent:
 
             block_result = None
             blocked_by_guardrail = False
+
+            # ── Skill Evaluation Gate ──────────────────────────────────
+            # Before the first action tool call, force the agent to evaluate
+            # and load relevant skills. This is code-level enforcement.
+            try:
+                from agent.skill_eval_gate import should_block_tool, is_skill_view_call
+                if is_skill_view_call(function_name):
+                    self._skill_eval_done = True
+                elif not self._skill_eval_done and should_block_tool(function_name):
+                    block_message = (
+                        "SKILL EVALUATION REQUIRED: Before executing this tool, you MUST "
+                        "evaluate the skill index in your system prompt and call skill_view() "
+                        "for any skills relevant to this task. If no skills match, call "
+                        "skill_view(name='hermes-agent') as a minimal acknowledgment and proceed."
+                    )
+            except ImportError:
+                pass
+
             try:
                 from hermes_cli.plugins import get_pre_tool_call_block_message
                 block_message = get_pre_tool_call_block_message(
