@@ -23,15 +23,15 @@ TASK_PATTERNS = {
         ['python-debugpy', 'debugging-hermes-tui-commands', 'test-driven-development'],
     
     # GitHub operations  
-    r'(github|pull request|pr|merge|commit|git|仓库|repository|branch)':
+    r'(github|pull request|pr|merge|commit|git|仓库|repository|branch|review|code.?review)':
         ['github-pr-workflow', 'github-code-review', 'requesting-code-review'],
     
     # System administration
-    r'(systemd|gateway|restart|service|process|kill|port|config|配置|系统)':
+    r'(systemd|gateway|restart|service|process|kill|port|config|配置|系统|cron|定时|scheduled|计划任务)':
         ['hermes-agent', 'cron-management', 'gateway-troubleshooting'],
     
     # Research tasks
-    r'(research|研究|web search|scrape|crawl|cloudflare|bypass|数据|data|信息|information)':
+    r'(research|研究|search|搜索|scrape|crawl|cloudflare|bypass|信息|information|news|新闻|latest|最新)':
         ['research-workflows', 'deep-research-v4'],
     
     # Skill management
@@ -39,12 +39,16 @@ TASK_PATTERNS = {
         ['hermes-skill-factory', 'skill-authoring'],
     
     # Testing
-    r'(test|测试|pytest|unit test|integration test|coverage|assert)':
+    r'(\btest\b|测试|pytest|unit.?test|integration.?test|coverage|assert|写测试|写个测试)':
         ['test-driven-development', 'pytest-parallel'],
     
     # AI model/cost
     r'(model|模型|provider|api|key|token|credit|pricing|cost|成本|费用)':
         ['token-cost-analysis', 'model-provider-setup'],
+    
+    # Email (before writing — "写邮件" should match email, not writing)
+    r'(email|邮件|mail|gmail|inbox|收件箱|发邮件|写邮件|写信)':
+        ['himalaya', 'google-workspace'],
     
     # Writing/content creation
     r'(write|写|小说|novel|article|文章|blog|博客|report|报告|essay|论文|chapter|章|story|故事|content|创作|long.?form)':
@@ -58,9 +62,25 @@ TASK_PATTERNS = {
     r'(data|数据|excel|csv|analysis|分析|pandas|matplotlib|chart|图表|visualization|可视化)':
         ['jupyter-live-kernel', 'research-workflows'],
     
-    # Image/media
-    r'(image|图片|photo|照片|video|视频|audio|音频|generate|生成|comfyui|stable.?diffusion)':
+    # Image/media (specific tools first, generic media terms last)
+    r'(comfyui|stable.?diffusion|midjourney|dall.?e|ascii.?video|ascii.?art)':
+        ['comfyui', 'stable-diffusion-image-generation', 'ascii-video'],
+    r'(image|图片|photo|照片|generate|生成|画|绘图)':
         ['comfyui', 'stable-diffusion-image-generation'],
+    r'(video|视频|audio|音频|music|音乐|voice|语音)':
+        ['ascii-video', 'audiocraft-audio-generation', 'whisper'],
+    
+    # Presentation/PPT
+    r'(ppt|presentation|演示|幻灯片|slides|deck|展示)':
+        ['powerpoint', 'claude-design'],
+    
+    # Note-taking
+    r'(note|笔记|obsidian|notion|memo|备忘录)':
+        ['obsidian', 'notion'],
+    
+    # Smart home
+    r'(smart.?home|智能家居|light|灯|hue|temperature|温度)':
+        ['openhue'],
 }
 
 # Layer 3: Complex task indicators (may need AI inference)
