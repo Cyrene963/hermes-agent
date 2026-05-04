@@ -1,0 +1,6 @@
+name: skill-router
+version: 1.0.0
+description: "Auto-load skills on first action tool call. Forces skill loading checkpoint before agent can execute any tool, ensuring task-orchestrator and relevant skills are loaded."
+author: "Hermes Agent"
+hooks:
+  - pre_tool_call
