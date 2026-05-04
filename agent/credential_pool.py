@@ -305,11 +305,29 @@ def _iter_custom_providers(config: Optional[dict] = None):
         yield _normalize_custom_pool_name(name), entry
 
 
-def get_custom_provider_pool_key(base_url: str) -> Optional[str]:
-    """Look up the custom_providers list in config.yaml and return 'custom:<name>' for a matching base_url.
+def get_custom_provider_pool_key(base_url: str, provider_name: Optional[str] = None) -> Optional[str]:
+    """Look up the custom_providers list in config.yaml and return 'custom:<name>' for a matching provider.
+
+    When *provider_name* is given (and is not bare ``"custom"``), the lookup
+    matches by provider name first — this disambiguates when multiple
+    ``custom_providers`` share the same ``base_url``.
+
+    Falls back to *base_url*-only matching when *provider_name* is ``None``
+    or ``"custom"`` (the generic label the config layer uses).
 
     Returns None if no match is found.
     """
+    if not base_url and not provider_name:
+        return None
+
+    # --- Fast path: match by name when we have a specific provider name ---
+    if provider_name and provider_name.strip().lower() not in ("custom", ""):
+        target_norm = _normalize_custom_pool_name(provider_name)
+        for norm_name, entry in _iter_custom_providers():
+            if norm_name == target_norm:
+                return f"{CUSTOM_POOL_PREFIX}{norm_name}"
+
+    # --- Fallback: match by base_url ---
     if not base_url:
         return None
     normalized_url = base_url.strip().rstrip("/")
@@ -1535,9 +1553,12 @@ def _seed_custom_pool(pool_key: str, entries: List[PooledCredential]) -> Tuple[b
                     model_api_key = v.strip()
                     break
             if model_provider == "custom" and model_base_url and model_api_key:
-                # Check if this model's base_url matches our custom provider
-                matched_key = get_custom_provider_pool_key(model_base_url)
-                if matched_key == pool_key:
+                # Check if this model's base_url matches THIS custom provider
+                # (use the pool_key's own config to avoid first-match ambiguity
+                # when multiple providers share the same base_url — #19083)
+                cp_cfg = _get_custom_provider_config(pool_key)
+                cp_url = str((cp_cfg or {}).get("base_url") or "").strip().rstrip("/") if cp_cfg else ""
+                if cp_url and cp_url == model_base_url:
                     source = "model_config"
                     if not _is_suppressed(pool_key, source):
                         active_sources.add(source)
