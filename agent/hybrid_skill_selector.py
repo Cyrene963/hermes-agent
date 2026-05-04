@@ -45,6 +45,22 @@ TASK_PATTERNS = {
     # AI model/cost
     r'(model|模型|provider|api|key|token|credit|pricing|cost|成本|费用)':
         ['token-cost-analysis', 'model-provider-setup'],
+    
+    # Writing/content creation
+    r'(write|写|小说|novel|article|文章|blog|博客|report|报告|essay|论文|chapter|章|story|故事|content|创作|long.?form)':
+        ['verified-long-form-writing', 'deep-work'],
+    
+    # Deployment/DevOps
+    r'(deploy|部署|docker|container|容器|kubernetes|k8s|ci.?cd|pipeline|server|服务器|hosting|host)':
+        ['hermes-agent', 'cron-management'],
+    
+    # Data analysis
+    r'(data|数据|excel|csv|analysis|分析|pandas|matplotlib|chart|图表|visualization|可视化)':
+        ['jupyter-live-kernel', 'research-workflows'],
+    
+    # Image/media
+    r'(image|图片|photo|照片|video|视频|audio|音频|generate|生成|comfyui|stable.?diffusion)':
+        ['comfyui', 'stable-diffusion-image-generation'],
 }
 
 # Layer 3: Complex task indicators (may need AI inference)
