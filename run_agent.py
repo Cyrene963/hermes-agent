@@ -9432,10 +9432,14 @@ class AIAgent:
             # ── Skill Evaluation Gate (sequential path) ─────────────────
             if block_message is None:
                 try:
-                    from agent.skill_eval_gate import should_block_tool, is_skill_view_call
+                    from agent.skill_eval_gate import (
+                        should_block_tool, is_skill_view_call, mark_evaluated,
+                    )
+                    _sid = self.session_id or effective_task_id or ""
                     if is_skill_view_call(function_name):
                         self._skill_eval_done = True
-                    elif not self._skill_eval_done and should_block_tool(function_name):
+                        mark_evaluated(_sid)  # sync with model_tools.py
+                    elif not self._skill_eval_done and should_block_tool(function_name, _sid):
                         block_message = (
                             "SKILL EVALUATION REQUIRED: Before executing this tool, you MUST "
                             "evaluate the skill index in your system prompt and call skill_view() "
@@ -9604,10 +9608,14 @@ class AIAgent:
             # Before the first action tool call, force the agent to evaluate
             # and load relevant skills. This is code-level enforcement.
             try:
-                from agent.skill_eval_gate import should_block_tool, is_skill_view_call
+                from agent.skill_eval_gate import (
+                    should_block_tool, is_skill_view_call, mark_evaluated,
+                )
+                _sid = self.session_id or effective_task_id or ""
                 if is_skill_view_call(function_name):
                     self._skill_eval_done = True
-                elif not self._skill_eval_done and should_block_tool(function_name):
+                    mark_evaluated(_sid)  # sync with model_tools.py
+                elif not self._skill_eval_done and should_block_tool(function_name, _sid):
                     block_message = (
                         "SKILL EVALUATION REQUIRED: Before executing this tool, you MUST "
                         "evaluate the skill index in your system prompt and call skill_view() "

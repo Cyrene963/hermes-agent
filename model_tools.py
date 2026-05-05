@@ -701,6 +701,31 @@ def handle_function_call(
             if block_message is not None:
                 return json.dumps({"error": block_message}, ensure_ascii=False)
 
+        # ── SKILL EVALUATION GATE ──────────────────────────────────────
+        # Before the first action tool call in a session, the agent MUST
+        # call skill_view() to evaluate which skills are relevant.  This
+        # is a code-level gate — the agent cannot skip it.
+        # When skill_view IS called, mark the session as evaluated so all
+        # subsequent tools proceed freely.
+        try:
+            from agent.skill_eval_gate import (
+                should_block_tool,
+                is_skill_view_call,
+                mark_evaluated,
+                get_skill_eval_instruction,
+            )
+            _sid = session_id or task_id or ""
+            if is_skill_view_call(function_name):
+                mark_evaluated(_sid)
+            elif should_block_tool(function_name, _sid):
+                return json.dumps({
+                    "error": get_skill_eval_instruction()
+                }, ensure_ascii=False)
+        except ImportError:
+            pass  # skill_eval_gate not available — fail open
+        except Exception as _gate_err:
+            logger.debug("skill_eval_gate error (fail-open): %s", _gate_err)
+
         # Notify the read-loop tracker when a non-read/search tool runs,
         # so the *consecutive* counter resets (reads after other work are fine).
         if function_name not in _READ_SEARCH_TOOLS:
