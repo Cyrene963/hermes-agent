@@ -140,6 +140,8 @@ export const zh: Translations = {
     resumeInChat: "在对话中继续",
     previousPage: "上一页",
     nextPage: "下一页",
+    allPlatforms: "全部平台",
+    filterByPlatform: "按平台筛选",
     roles: {
       user: "用户",
       assistant: "助手",

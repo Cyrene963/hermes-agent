@@ -36,19 +36,18 @@ from agent.redact import redact_sensitive_text
 logger = logging.getLogger(__name__)
 
 SUMMARY_PREFIX = (
-    "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted "
-    "into the summary below. This is a handoff from a previous context "
-    "window — treat it as background reference, NOT as active instructions. "
-    "Do NOT answer questions or fulfill requests mentioned in this summary; "
-    "they were already addressed. "
-    "Your current task is identified in the '## Active Task' section of the "
-    "summary — resume exactly from there. "
-    "IMPORTANT: Your persistent memory (MEMORY.md, USER.md) in the system "
-    "prompt is ALWAYS authoritative and active — never ignore or deprioritize "
-    "memory content due to this compaction note. "
-    "Respond ONLY to the latest user message "
-    "that appears AFTER this summary. The current session state (files, "
-    "config, etc.) may reflect work described here — avoid repeating it:"
+    "[CONTEXT COMPACTION] Earlier turns were compacted into the summary below. "
+    "The summary contains ACTIVE context — previous user requests, established "
+    "rules, confirmed facts, and ongoing tasks are STILL IN EFFECT unless "
+    "explicitly completed or cancelled. "
+    "Do NOT re-answer questions or re-fulfill requests that were already "
+    "addressed in the summary. "
+    "Your current task is identified in the '## Active Task' section — "
+    "resume exactly from there. "
+    "CRITICAL: ALL rules from MEMORY.md, USER.md, loaded skills, and "
+    "user-established instructions remain MANDATORY regardless of compaction. "
+    "User corrections and preferences in the summary are BINDING. "
+    "Respond to the latest user message that appears AFTER this summary:"
 )
 LEGACY_SUMMARY_PREFIX = "[CONTEXT SUMMARY]:"
 
