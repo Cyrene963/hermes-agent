@@ -5082,7 +5082,7 @@ class AIAgent:
         # Use session_start timestamp for stability across turns within the same session.
         # Regenerating the timestamp on every API call would invalidate the KV cache
         # prefix even though the session hasn't actually started at a different time.
-        timestamp_line = f"Conversation started: {self.session_start.strftime('%A, %B %d, %Y %I:%M %p')}"
+        timestamp_line = f"Session started: {self.session_start.strftime('%A, %B %d, %Y %I:%M %p')}"
         if self.pass_session_id and self.session_id:
             timestamp_line += f"\nSession ID: {self.session_id}"
         if self.model:
@@ -10364,7 +10364,19 @@ class AIAgent:
             "Please provide a final response summarizing what you've found and accomplished so far, "
             "without calling any more tools."
         )
-        messages.append({"role": "user", "content": summary_request})
+        # Append current time so the agent has accurate sense of "now" even in recovery path
+        _time_prefix = ""
+        try:
+            from hermes_time import now as _ht_now, get_timezone_name as _get_tz
+            _current = _ht_now()
+            _time_prefix = f"[Current time: {_current.strftime('%A, %B %d, %Y %I:%M %p')}"
+            _tz = _get_tz()
+            if _tz:
+                _time_prefix += f" ({_tz})"
+            _time_prefix += "]\n\n"
+        except Exception:
+            pass
+        messages.append({"role": "user", "content": _time_prefix + summary_request})
 
         try:
             # Build API messages, stripping internal-only fields
@@ -10875,6 +10887,32 @@ class AIAgent:
                 _plugin_user_context = "\n\n".join(_ctx_parts)
         except Exception as exc:
             logger.warning("pre_llm_call hook failed: %s", exc)
+
+        # ── Built-in current-time injection ──
+        # The system prompt contains the *session start* time (frozen for
+        # cache stability).  To prevent the agent from treating a stale
+        # timestamp as "now", we inject the actual current time into the
+        # user message on every turn — same mechanism that plugins use,
+        # so the system prompt cache prefix is preserved.
+        _time_ctx_parts: list[str] = []
+        try:
+            from hermes_time import now as _ht_now, get_timezone_name as _get_tz
+            _current = _ht_now()
+            _time_ctx_parts.append(
+                f"Current time: {_current.strftime('%A, %B %d, %Y %I:%M %p')}"
+            )
+            _tz = _get_tz()
+            if _tz:
+                _time_ctx_parts.append(f"Timezone: {_tz}")
+        except Exception:
+            pass  # non-critical; agent can fall back to ``date`` command
+        if _time_ctx_parts:
+            _time_block = "\n".join(_time_ctx_parts)
+            _plugin_user_context = (
+                f"{_time_block}\n\n{_plugin_user_context}"
+                if _plugin_user_context
+                else _time_block
+            )
 
         # Main conversation loop
         api_call_count = 0
