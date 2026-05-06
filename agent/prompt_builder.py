@@ -772,13 +772,14 @@ def build_skills_system_prompt_semantic(
         
         # Check if we should skip skills entirely (greetings, simple questions)
         if should_skip_skills(user_message):
-            logger.debug("Hybrid selector: skipping skills for simple message")
+            logger.info("SKILL_STATS: method=skip count=0")
             return ""  # No skills needed for greetings
         
         # Get hybrid selection result
         hybrid_result = hybrid_skill_select(user_message)
         if hybrid_result["method"] == "task_pattern" and hybrid_result["selected_skills"]:
             # High confidence match - use predefined skills
+            logger.info("SKILL_STATS: method=task_pattern count=%d", len(hybrid_result["selected_skills"]))
             logger.debug("Hybrid selector: using task pattern skills %s (confidence: %.2f)", 
                         hybrid_result["selected_skills"], hybrid_result["confidence"])
             
@@ -825,6 +826,7 @@ def build_skills_system_prompt_semantic(
                 "Hybrid skill selection: %d skills injected via task pattern (confidence: %.2f)",
                 len(hybrid_skills), hybrid_result["confidence"]
             )
+            logger.info("SKILL_STATS: method=task_pattern count=%d", len(hybrid_skills))
             return result
         
         # Handle AI inference layer
@@ -876,6 +878,7 @@ def build_skills_system_prompt_semantic(
                 "Hybrid skill selection: %d skills injected via AI inference (confidence: %.2f)",
                 len(hybrid_skills), hybrid_result["confidence"]
             )
+            logger.info("SKILL_STATS: method=ai_inference count=%d", len(hybrid_skills))
             return result
         
         # If hybrid selection didn't produce results or needs FTS5, continue with original FTS5 logic
@@ -970,6 +973,7 @@ def build_skills_system_prompt_semantic(
             db.get_skill_count(),
             user_message[:50],
         )
+        logger.info("SKILL_STATS: method=fts5 count=%d total=%d", len(combined), db.get_skill_count())
         return result
 
     except Exception as e:
@@ -1208,6 +1212,7 @@ def build_skills_system_prompt(
         while len(_SKILLS_PROMPT_CACHE) > _SKILLS_PROMPT_CACHE_MAX:
             _SKILLS_PROMPT_CACHE.popitem(last=False)
 
+    logger.info("SKILL_STATS: method=broadcast count=%d", len(seen_skill_names))
     return result
 
 
