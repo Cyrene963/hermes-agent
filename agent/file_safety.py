@@ -164,4 +164,18 @@ def get_read_block_error(path: str) -> Optional[str]:
             "and cannot be read directly to prevent prompt injection. "
             "Use the skills_list or skill_view tools instead."
         )
+    # Block credential stores at the top level of HERMES_HOME.
+    # Only the direct children (not files in subdirectories) are denied.
+    _CREDENTIAL_FILES = {"auth.json", "auth.lock", ".anthropic_oauth.json"}
+    try:
+        resolved.relative_to(hermes_home)
+    except ValueError:
+        pass
+    else:
+        # It's inside HERMES_HOME — check it's a direct child, not nested.
+        if resolved.parent.resolve() == hermes_home and resolved.name in _CREDENTIAL_FILES:
+            return (
+                f"Access denied: {path} is a Hermes credential store "
+                "and cannot be read to prevent credential exfiltration."
+            )
     return None

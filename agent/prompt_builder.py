@@ -240,6 +240,24 @@ KANBAN_GUIDANCE = (
     "cross-agent handoffs that outlive one API loop."
 )
 
+
+# Pre-flight thinking block -- injected at the VERY TOP of the system prompt
+# Forces the model to internally assess what it knows before generating a response.
+PRE_FLIGHT_THINKING_BLOCK = (
+    "# Pre-Flight Thinking (MANDATORY -- execute before every response)\n"
+    "Before generating ANY response, you MUST internally assess:\n"
+    "1. Do I already have relevant knowledge from memory, hindsight, or past sessions?\n"
+    "   -> If uncertain, call `hindsight_recall` with key terms from the user's message.\n"
+    "2. Have we discussed this topic before?\n"
+    "   -> If it feels familiar, call `session_search` to check.\n"
+    "3. Is there a skill that governs this type of task?\n"
+    "   -> If it involves facts, verification, or domain knowledge, call `skill_view`.\n"
+    "4. Am I about to state something I haven't verified?\n"
+    "   -> If yes, use tools to verify first. Never guess.\n\n"
+    "You have these tools for a reason -- use them proactively, not reactively.\n"
+    "A good response starts with knowing what you know, not with generating text.\n"
+)
+
 TOOL_USE_ENFORCEMENT_GUIDANCE = (
     "# Tool-use enforcement\n"
     "You MUST use your tools to take action — do not describe what you would do "
@@ -772,13 +790,14 @@ def build_skills_system_prompt_semantic(
         
         # Check if we should skip skills entirely (greetings, simple questions)
         if should_skip_skills(user_message):
-            logger.debug("Hybrid selector: skipping skills for simple message")
+            logger.info("SKILL_STATS: method=skip count=0")
             return ""  # No skills needed for greetings
         
         # Get hybrid selection result
         hybrid_result = hybrid_skill_select(user_message)
         if hybrid_result["method"] == "task_pattern" and hybrid_result["selected_skills"]:
             # High confidence match - use predefined skills
+            logger.info("SKILL_STATS: method=task_pattern count=%d", len(hybrid_result["selected_skills"]))
             logger.debug("Hybrid selector: using task pattern skills %s (confidence: %.2f)", 
                         hybrid_result["selected_skills"], hybrid_result["confidence"])
             
@@ -825,6 +844,7 @@ def build_skills_system_prompt_semantic(
                 "Hybrid skill selection: %d skills injected via task pattern (confidence: %.2f)",
                 len(hybrid_skills), hybrid_result["confidence"]
             )
+            logger.info("SKILL_STATS: method=task_pattern count=%d", len(hybrid_skills))
             return result
         
         # Handle AI inference layer
@@ -876,6 +896,7 @@ def build_skills_system_prompt_semantic(
                 "Hybrid skill selection: %d skills injected via AI inference (confidence: %.2f)",
                 len(hybrid_skills), hybrid_result["confidence"]
             )
+            logger.info("SKILL_STATS: method=ai_inference count=%d", len(hybrid_skills))
             return result
         
         # If hybrid selection didn't produce results or needs FTS5, continue with original FTS5 logic
@@ -970,6 +991,7 @@ def build_skills_system_prompt_semantic(
             db.get_skill_count(),
             user_message[:50],
         )
+        logger.info("SKILL_STATS: method=fts5 count=%d total=%d", len(combined), db.get_skill_count())
         return result
 
     except Exception as e:
@@ -1208,6 +1230,7 @@ def build_skills_system_prompt(
         while len(_SKILLS_PROMPT_CACHE) > _SKILLS_PROMPT_CACHE_MAX:
             _SKILLS_PROMPT_CACHE.popitem(last=False)
 
+    logger.info("SKILL_STATS: method=broadcast count=%d", len(seen_skill_names))
     return result
 
 

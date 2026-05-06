@@ -150,7 +150,7 @@ from agent.model_metadata import (
 from agent.context_compressor import ContextCompressor
 from agent.subdirectory_hints import SubdirectoryHintTracker
 from agent.prompt_caching import apply_anthropic_cache_control
-from agent.prompt_builder import build_skills_system_prompt, build_skills_system_prompt_semantic, build_context_files_prompt, build_environment_hints, load_soul_md, TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS, GOOGLE_MODEL_OPERATIONAL_GUIDANCE, OPENAI_MODEL_EXECUTION_GUIDANCE, MIMO_MODEL_EXECUTION_GUIDANCE
+from agent.prompt_builder import build_skills_system_prompt, build_skills_system_prompt_semantic, build_context_files_prompt, build_environment_hints, load_soul_md, TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS, GOOGLE_MODEL_OPERATIONAL_GUIDANCE, OPENAI_MODEL_EXECUTION_GUIDANCE, MIMO_MODEL_EXECUTION_GUIDANCE, PRE_FLIGHT_THINKING_BLOCK
 from agent.usage_pricing import estimate_usage_cost, normalize_usage
 from agent.codex_responses_adapter import (
     _derive_responses_function_call_id as _codex_derive_responses_function_call_id,
@@ -1722,6 +1722,7 @@ class AIAgent:
         self._memory_nudge_interval = 10
         self._turns_since_memory = 0
         self._iters_since_skill = 0
+        self._skill_eval_done = False   # Skill Evaluation Gate: set True after first skill_view
         if not skip_memory:
             try:
                 mem_config = _agent_cfg.get("memory", {})
@@ -1858,6 +1859,17 @@ class AIAgent:
         else:
             self._skill_enforcement_enabled = False
             self._skill_enforcement_mode = "warn"
+
+        # Fact verification gate config
+        _fact_ver = _agent_section.get("fact_verification", {})
+        if isinstance(_fact_ver, dict):
+            self._fact_verification_enabled = _fact_ver.get("enabled", True)
+            self._fact_verification_cooldown = int(_fact_ver.get("cooldown", 3))
+            self._fact_verification_mode = _fact_ver.get("mode", "block")
+        else:
+            self._fact_verification_enabled = True
+            self._fact_verification_cooldown = 3
+            self._fact_verification_mode = "block"
 
         # App-level API retry count (wraps each model API call).  Default 3,
         # overridable via agent.api_max_retries in config.yaml.  See #11616.
@@ -4934,6 +4946,11 @@ class AIAgent:
             # Fallback to hardcoded identity
             prompt_parts = [DEFAULT_AGENT_IDENTITY]
 
+        # Pre-flight thinking block -- THE FIRST THING the model reads.
+        if ("hindsight_recall" in self.valid_tool_names
+                or "session_search" in self.valid_tool_names):
+            prompt_parts.insert(0, PRE_FLIGHT_THINKING_BLOCK)
+
         # Pointer to the hermes-agent skill + docs for user questions about Hermes itself.
         prompt_parts.append(HERMES_AGENT_HELP_GUIDANCE)
 
@@ -5038,7 +5055,7 @@ class AIAgent:
                 with open(config_path, "r") as f:
                     _cfg = yaml.safe_load(f) or {}
                 _skills_cfg = _cfg.get("skills", {}) if isinstance(_cfg, dict) else {}
-                retrieval_mode = _skills_cfg.get("retrieval", "broadcast") if isinstance(_skills_cfg, dict) else "broadcast"
+                retrieval_mode = _skills_cfg.get("retrieval", "semantic") if isinstance(_skills_cfg, dict) else "semantic"
                 top_k = int(_skills_cfg.get("top_k", 15)) if isinstance(_skills_cfg, dict) else 15
             except Exception:
                 retrieval_mode = "broadcast"
@@ -5060,6 +5077,16 @@ class AIAgent:
             skills_prompt = ""
         if skills_prompt:
             prompt_parts.append(skills_prompt)
+
+        # Inject skill evaluation gate instruction.
+        # Forces the agent to evaluate and load relevant skills before taking any action.
+        # This is code-level enforcement — NOT keyword matching.
+        if has_skills_tools:
+            try:
+                from agent.skill_eval_gate import get_skill_eval_instruction
+                prompt_parts.append(get_skill_eval_instruction())
+            except ImportError:
+                pass
 
         # Inject mandatory skills prompt if configured.
         # These skills MUST be loaded before responding to any factual question.
@@ -9533,6 +9560,23 @@ class AIAgent:
                 )
             except Exception:
                 pass
+
+            # ── Skill Evaluation Gate (sequential path) ─────────────────
+            if block_message is None:
+                try:
+                    from agent.skill_eval_gate import should_block_tool, is_skill_view_call
+                    if is_skill_view_call(function_name):
+                        self._skill_eval_done = True
+                    elif not self._skill_eval_done and should_block_tool(function_name):
+                        block_message = (
+                            "SKILL EVALUATION REQUIRED: Before executing this tool, you MUST "
+                            "evaluate the skill index in your system prompt and call skill_view() "
+                            "for any skills relevant to this task. If no skills match, call "
+                            "skill_view(name='hermes-agent') as a minimal acknowledgment and proceed."
+                        )
+                except ImportError:
+                    pass
+
         if block_message is not None:
             return json.dumps({"error": block_message}, ensure_ascii=False)
 
@@ -9688,6 +9732,24 @@ class AIAgent:
 
             block_result = None
             blocked_by_guardrail = False
+
+            # ── Skill Evaluation Gate ──────────────────────────────────
+            # Before the first action tool call, force the agent to evaluate
+            # and load relevant skills. This is code-level enforcement.
+            try:
+                from agent.skill_eval_gate import should_block_tool, is_skill_view_call
+                if is_skill_view_call(function_name):
+                    self._skill_eval_done = True
+                elif not self._skill_eval_done and should_block_tool(function_name):
+                    block_message = (
+                        "SKILL EVALUATION REQUIRED: Before executing this tool, you MUST "
+                        "evaluate the skill index in your system prompt and call skill_view() "
+                        "for any skills relevant to this task. If no skills match, call "
+                        "skill_view(name='hermes-agent') as a minimal acknowledgment and proceed."
+                    )
+            except ImportError:
+                pass
+
             try:
                 from hermes_cli.plugins import get_pre_tool_call_block_message
                 block_message = get_pre_tool_call_block_message(
@@ -10617,43 +10679,38 @@ class AIAgent:
         return final_response
 
     def _verify_skill_compliance(self, response: str, loaded_skills: list[str]) -> list[str]:
-        """Check if response violates rules from loaded skills.
-        
-        Returns a list of violations. Empty list means compliant.
+        """Check if response contains unverified factual claims.
+        CODE-LEVEL check using regex heuristics.
         """
+        import re
         violations = []
+        _strip = re.sub(r'<thinking>.*?</thinking>', '', response, flags=re.DOTALL).strip()
+        if len(_strip) < 80:
+            return []
         response_lower = response.lower()
-        
-        # Check precision-and-verification rules
-        if 'precision-and-verification' in loaded_skills:
-            # Check for unverified price claims (common hallucination pattern)
-            price_patterns = [
-                r'¥\d+', r'\$\d+', r'€\d+',  # Currency amounts
-                r'每[月天年]\d+', r'每月', r'每年',  # Chinese price patterns
-                r'元/[月天年]', r'美元', r'人民币',
-            ]
-            import re
-            for pattern in price_patterns:
-                if re.search(pattern, response):
-                    # Check if response mentions verification source
-                    verification_indicators = ['官方', 'official', '文档', 'website', 'website', '网站', '查询', 'verified', 'confirmed']
-                    if not any(indicator in response_lower for indicator in verification_indicators):
-                        violations.append(f"precision-and-verification: price claim without verification source")
-                        break
-        
-        # Check investigate-before-act rules
-        if 'investigate-before-act' in loaded_skills:
-            # Check for claims about server/system specs without tool calls
-            spec_patterns = ['cpu', 'memory', '内存', '磁盘', 'disk', '服务器', 'server', '配置']
-            if any(pattern in response_lower for pattern in spec_patterns):
-                # Check if this looks like a factual claim about current state
-                claim_indicators = ['是', '为', '有', '使用', 'running', 'is', 'has']
-                if any(indicator in response_lower for indicator in claim_indicators):
-                    # This is a potential unverified claim - check if tools were used
-                    # (We can't know for sure here, but we can warn)
-                    pass  # The warning is handled by the mandatory skills prompt
-        
+        # Price/cost claims
+        for p in [r'¥\s*\d+', r'\$\s*\d+', r'€\s*\d+', r'\d+\s*(块钱|元|美元|人民币|港币|美金)', r'每[月天年]\s*\d+', r'\d+\s*/\s*[月天年]', r'(free|免费|收费|付费|定价|pricing|cost)']:
+            if re.search(p, response, re.IGNORECASE): violations.append("price_claim"); break
+        # Number claims
+        for p in [r'\d{1,3}(,\d{3})+\s*(token|请求|request|次)', r'\d+亿', r'\d+\.\d+%', r'(节省|减少|降低|提升|增加)\s*(了|约|近)?\s*\d+', r'\d+[KkMm]\s*(token|参数|param)']:
+            if re.search(p, response, re.IGNORECASE): violations.append("number_claim"); break
+        # Product/spec claims
+        for p in [r'(模型|model)\s*(是|为|=|:)\s*\w+', r'(支持|support)\s*\d+\s*[KkMm]?(?:token|参数|上下文|context)', r'(版本|version)\s*(是|为|=|:)\s*[\d.]+']:
+            if re.search(p, response, re.IGNORECASE): violations.append("product_claim"); break
+        # Stat claims
+        for p in [r'(第[一二三四五六七八九十\d]+|排名|位列)', r'(准确率|成功率|通过率)\s*(达到|为|是)\s*\d+']:
+            if re.search(p, response, re.IGNORECASE): violations.append("stat_claim"); break
         return violations
+
+    def _has_recent_verification(self, messages: list, lookback: int = 15) -> bool:
+        """Check if verification tools were used in recent messages. CODE-LEVEL."""
+        _vtools = {'web_search', 'web_extract', 'browser_navigate', 'hindsight_recall', 'session_search', 'skill_view', 'terminal', 'execute_code'}
+        recent = messages[-lookback:] if len(messages) > lookback else messages
+        for msg in recent:
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                for tc in msg["tool_calls"]:
+                    if tc.get("function", {}).get("name", "") in _vtools: return True
+        return False
     
     def run_conversation(
         self,
@@ -10739,6 +10796,7 @@ class AIAgent:
         self._last_content_tools_all_housekeeping = False
         self._mute_post_response = False
         self._unicode_sanitization_passes = 0
+        self._fact_verification_last_fire = -999
         self._tool_guardrails.reset_for_turn()
         self._tool_guardrail_halt_decision = None
 
@@ -13972,6 +14030,29 @@ class AIAgent:
                     final_response = self._strip_think_blocks(final_response).strip()
                     
                     final_msg = self._build_assistant_message(assistant_message, finish_reason)
+
+                    # -- Fact verification gate v2 --
+                    if (getattr(self, '_fact_verification_enabled', True)
+                            and final_response
+                            and self._has_content_after_think_block(final_response)
+                            and api_call_count >= 2):
+                        _cooldown = getattr(self, '_fact_verification_cooldown', 3)
+                        _calls_since = api_call_count - getattr(self, '_fact_verification_last_fire', -999)
+                        if _calls_since >= _cooldown:
+                            violations = self._verify_skill_compliance(final_response, [])
+                            if violations and not self._has_recent_verification(messages, 15):
+                                self._fact_verification_last_fire = api_call_count
+                                _mode = getattr(self, '_fact_verification_mode', 'block')
+                                logger.info("Fact gate: %s violations=%s", _mode, violations)
+                                if _mode == "block":
+                                    self._emit_status(f"Unverified claims ({', '.join(violations)}) -- requiring verification")
+                                    _am = self._build_assistant_message(assistant_message, finish_reason)
+                                    _am["content"] = final_response
+                                    messages.append(_am)
+                                    messages.append({"role": "user", "content": f"VERIFICATION REQUIRED: Your response triggered detection: {', '.join(violations)}. You MUST call web_search/terminal/skill_view to verify before delivering."})
+                                    self._session_messages = messages
+                                    self._save_session_log(messages)
+                                    continue
 
                     # Pop thinking-only prefill message(s) before appending
                     # the final response.  This avoids consecutive assistant
