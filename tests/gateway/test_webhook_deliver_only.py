@@ -25,7 +25,25 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import MessageEvent, SendResult
-from gateway.platforms.webhook import WebhookAdapter, _INSECURE_NO_AUTH
+from gateway.platforms.webhook import WebhookAdapter
+
+
+# ---------------------------------------------------------------------------
+# Test constants & HMAC helpers
+# ---------------------------------------------------------------------------
+
+_TEST_SECRET = "test-hmac-secret-for-unit-tests"
+
+
+def _github_signature(body: bytes, secret: str) -> str:
+    return "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+
+
+def _signed_github_headers(body: bytes, secret: str, event: str = "push") -> dict:
+    return {
+        "X-GitHub-Event": event,
+        "X-Hub-Signature-256": _github_signature(body, secret),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -70,7 +88,7 @@ class TestDeliverOnlyBypassesAgent:
     async def test_post_delivers_directly_without_agent(self):
         routes = {
             "match-alert": {
-                "secret": _INSECURE_NO_AUTH,
+                "secret": _TEST_SECRET,
                 "deliver": "telegram",
                 "deliver_only": True,
                 "deliver_extra": {"chat_id": "12345"},
@@ -100,6 +118,7 @@ class TestDeliverOnlyBypassesAgent:
                 headers={
                     "Content-Type": "application/json",
                     "X-GitHub-Delivery": "delivery-1",
+                    **_signed_github_headers(body, _TEST_SECRET, "push"),
                 },
             )
             assert resp.status == 200
@@ -126,7 +145,7 @@ class TestDeliverOnlyBypassesAgent:
         """Dot-notation template variables resolve in deliver_only mode."""
         routes = {
             "alert": {
-                "secret": _INSECURE_NO_AUTH,
+                "secret": _TEST_SECRET,
                 "deliver": "telegram",
                 "deliver_only": True,
                 "deliver_extra": {"chat_id": "chat-1"},
@@ -137,11 +156,16 @@ class TestDeliverOnlyBypassesAgent:
         mock_target = _wire_mock_target(adapter)
         app = _create_app(adapter)
 
+        body_alert = json.dumps({"build": {"number": 77, "status": "FAILED"}}).encode()
         async with TestClient(TestServer(app)) as cli:
             resp = await cli.post(
                 "/webhooks/alert",
-                json={"build": {"number": 77, "status": "FAILED"}},
-                headers={"X-GitHub-Delivery": "d-render-1"},
+                data=body_alert,
+                headers={
+                    "Content-Type": "application/json",
+                    "X-GitHub-Delivery": "d-render-1",
+                    **_signed_github_headers(body_alert, _TEST_SECRET, "push"),
+                },
             )
             assert resp.status == 200
 
@@ -154,7 +178,7 @@ class TestDeliverOnlyBypassesAgent:
         """deliver_extra.thread_id flows through to the target adapter."""
         routes = {
             "r": {
-                "secret": _INSECURE_NO_AUTH,
+                "secret": _TEST_SECRET,
                 "deliver": "telegram",
                 "deliver_only": True,
                 "deliver_extra": {"chat_id": "c-1", "thread_id": "topic-42"},
@@ -165,11 +189,16 @@ class TestDeliverOnlyBypassesAgent:
         mock_target = _wire_mock_target(adapter)
 
         app = _create_app(adapter)
+        body_r = json.dumps({}).encode()
         async with TestClient(TestServer(app)) as cli:
             resp = await cli.post(
                 "/webhooks/r",
-                json={},
-                headers={"X-GitHub-Delivery": "d-thread-1"},
+                data=body_r,
+                headers={
+                    "Content-Type": "application/json",
+                    "X-GitHub-Delivery": "d-thread-1",
+                    **_signed_github_headers(body_r, _TEST_SECRET, "push"),
+                },
             )
             assert resp.status == 200
 
@@ -189,7 +218,7 @@ class TestDeliverOnlyStatusCodes:
         """If the target adapter returns SendResult(success=False), 502."""
         routes = {
             "r": {
-                "secret": _INSECURE_NO_AUTH,
+                "secret": _TEST_SECRET,
                 "deliver": "telegram",
                 "deliver_only": True,
                 "deliver_extra": {"chat_id": "c-1"},
@@ -203,11 +232,16 @@ class TestDeliverOnlyStatusCodes:
         )
 
         app = _create_app(adapter)
+        body_fail = json.dumps({}).encode()
         async with TestClient(TestServer(app)) as cli:
             resp = await cli.post(
                 "/webhooks/r",
-                json={},
-                headers={"X-GitHub-Delivery": "d-fail-1"},
+                data=body_fail,
+                headers={
+                    "Content-Type": "application/json",
+                    "X-GitHub-Delivery": "d-fail-1",
+                    **_signed_github_headers(body_fail, _TEST_SECRET, "push"),
+                },
             )
             assert resp.status == 502
             data = await resp.json()
@@ -220,7 +254,7 @@ class TestDeliverOnlyStatusCodes:
         """If adapter.send() raises, we return 502 (not 500)."""
         routes = {
             "r": {
-                "secret": _INSECURE_NO_AUTH,
+                "secret": _TEST_SECRET,
                 "deliver": "telegram",
                 "deliver_only": True,
                 "deliver_extra": {"chat_id": "c-1"},
@@ -232,11 +266,16 @@ class TestDeliverOnlyStatusCodes:
         mock_target.send = AsyncMock(side_effect=RuntimeError("tg exploded"))
 
         app = _create_app(adapter)
+        body_exc = json.dumps({}).encode()
         async with TestClient(TestServer(app)) as cli:
             resp = await cli.post(
                 "/webhooks/r",
-                json={},
-                headers={"X-GitHub-Delivery": "d-exc-1"},
+                data=body_exc,
+                headers={
+                    "Content-Type": "application/json",
+                    "X-GitHub-Delivery": "d-exc-1",
+                    **_signed_github_headers(body_exc, _TEST_SECRET, "push"),
+                },
             )
             assert resp.status == 502
             data = await resp.json()
@@ -249,7 +288,7 @@ class TestDeliverOnlyStatusCodes:
         """deliver_only to a platform the gateway doesn't have → 502."""
         routes = {
             "r": {
-                "secret": _INSECURE_NO_AUTH,
+                "secret": _TEST_SECRET,
                 "deliver": "discord",  # not configured in mock runner
                 "deliver_only": True,
                 "deliver_extra": {"chat_id": "c-1"},
@@ -260,11 +299,16 @@ class TestDeliverOnlyStatusCodes:
         _wire_mock_target(adapter, platform_name="telegram")  # only TG wired
 
         app = _create_app(adapter)
+        body_np = json.dumps({}).encode()
         async with TestClient(TestServer(app)) as cli:
             resp = await cli.post(
                 "/webhooks/r",
-                json={},
-                headers={"X-GitHub-Delivery": "d-no-platform-1"},
+                data=body_np,
+                headers={
+                    "Content-Type": "application/json",
+                    "X-GitHub-Delivery": "d-no-platform-1",
+                    **_signed_github_headers(body_np, _TEST_SECRET, "push"),
+                },
             )
             assert resp.status == 502
 
@@ -280,7 +324,7 @@ class TestDeliverOnlyStartupValidation:
         """deliver_only=true + deliver=log is nonsense — reject at connect()."""
         routes = {
             "bad": {
-                "secret": _INSECURE_NO_AUTH,
+                "secret": _TEST_SECRET,
                 "deliver": "log",
                 "deliver_only": True,
                 "prompt": "hi",
@@ -295,7 +339,7 @@ class TestDeliverOnlyStartupValidation:
         """deliver_only=true with no deliver field defaults to 'log' → reject."""
         routes = {
             "bad": {
-                "secret": _INSECURE_NO_AUTH,
+                "secret": _TEST_SECRET,
                 # no deliver field
                 "deliver_only": True,
                 "prompt": "hi",
@@ -310,7 +354,7 @@ class TestDeliverOnlyStartupValidation:
         """Sanity check — a valid deliver_only config passes validation."""
         routes = {
             "good": {
-                "secret": _INSECURE_NO_AUTH,
+                "secret": _TEST_SECRET,
                 "deliver": "telegram",
                 "deliver_only": True,
                 "deliver_extra": {"chat_id": "c-1"},
@@ -369,7 +413,7 @@ class TestDeliverOnlySecurityInvariants:
         """Same delivery_id posted twice → second is suppressed."""
         routes = {
             "r": {
-                "secret": _INSECURE_NO_AUTH,
+                "secret": _TEST_SECRET,
                 "deliver": "telegram",
                 "deliver_only": True,
                 "deliver_extra": {"chat_id": "c-1"},
@@ -380,18 +424,23 @@ class TestDeliverOnlySecurityInvariants:
         mock_target = _wire_mock_target(adapter)
 
         app = _create_app(adapter)
+        body_dup = json.dumps({}).encode()
+        dup_headers = {
+            "Content-Type": "application/json",
+            **_signed_github_headers(body_dup, _TEST_SECRET, "push"),
+        }
         async with TestClient(TestServer(app)) as cli:
             r1 = await cli.post(
                 "/webhooks/r",
-                json={},
-                headers={"X-GitHub-Delivery": "dup-1"},
+                data=body_dup,
+                headers={"X-GitHub-Delivery": "dup-1", **dup_headers},
             )
             assert r1.status == 200
 
             r2 = await cli.post(
                 "/webhooks/r",
-                json={},
-                headers={"X-GitHub-Delivery": "dup-1"},
+                data=body_dup,
+                headers={"X-GitHub-Delivery": "dup-1", **dup_headers},
             )
             # Existing webhook adapter treats duplicates as 200 + status=duplicate
             assert r2.status == 200
@@ -406,7 +455,7 @@ class TestDeliverOnlySecurityInvariants:
         """Route-level rate limit caps deliver_only POSTs too."""
         routes = {
             "r": {
-                "secret": _INSECURE_NO_AUTH,
+                "secret": _TEST_SECRET,
                 "deliver": "telegram",
                 "deliver_only": True,
                 "deliver_extra": {"chat_id": "c-1"},
@@ -417,20 +466,25 @@ class TestDeliverOnlySecurityInvariants:
         _wire_mock_target(adapter)
 
         app = _create_app(adapter)
+        body_rl = json.dumps({}).encode()
+        rl_headers = {
+            "Content-Type": "application/json",
+            **_signed_github_headers(body_rl, _TEST_SECRET, "push"),
+        }
         async with TestClient(TestServer(app)) as cli:
             for i in range(2):
                 r = await cli.post(
                     "/webhooks/r",
-                    json={},
-                    headers={"X-GitHub-Delivery": f"rl-{i}"},
+                    data=body_rl,
+                    headers={"X-GitHub-Delivery": f"rl-{i}", **rl_headers},
                 )
                 assert r.status == 200
 
             # Third within the window → 429
             r3 = await cli.post(
                 "/webhooks/r",
-                json={},
-                headers={"X-GitHub-Delivery": "rl-3"},
+                data=body_rl,
+                headers={"X-GitHub-Delivery": "rl-3", **rl_headers},
             )
             assert r3.status == 429
 

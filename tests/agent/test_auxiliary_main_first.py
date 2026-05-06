@@ -144,6 +144,9 @@ class TestResolveAutoMainFirst:
         ), patch(
             "agent.auxiliary_client._read_main_model", return_value="config-model",
         ), patch(
+            "agent.auxiliary_client._validate_provider_credentials",
+            return_value=True,
+        ), patch(
             "agent.auxiliary_client.resolve_provider_client"
         ) as mock_resolve:
             mock_resolve.return_value = (MagicMock(), "runtime-model")

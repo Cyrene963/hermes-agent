@@ -52,6 +52,10 @@ SUMMARY_PREFIX = (
 )
 LEGACY_SUMMARY_PREFIX = "[CONTEXT SUMMARY]:"
 
+# Sentinel string used by _is_recompaction() to detect whether a system
+# prompt already carries our compaction note from a prior compression pass.
+_COMPRESSION_NOTE_SENTINEL = "[Note: Some earlier conversation turns have been compacted"
+
 # Minimum tokens for the summary output
 _MIN_SUMMARY_TOKENS = 2000
 # Proportion of compressed content to allocate for summary

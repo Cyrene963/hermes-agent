@@ -233,9 +233,10 @@ class TestDefaultConfig:
 
 
 # ---------------------------------------------------------------------------
-# _check_openrouter_cache_status
+# _check_openrouter_cache_status — REMOVED (method removed from AIAgent)
 # ---------------------------------------------------------------------------
 
+@pytest.mark.skip(reason="_check_openrouter_cache_status was removed from AIAgent")
 class TestCheckOpenrouterCacheStatus:
     """Test the _check_openrouter_cache_status method on AIAgent."""
 

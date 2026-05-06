@@ -8,7 +8,7 @@ Covers:
 - Idempotency cache (duplicate delivery IDs)
 - Rate limiting (fixed-window, per route)
 - Body size limits
-- INSECURE_NO_AUTH bypass
+- Secret-based authentication
 - Session isolation for concurrent webhooks
 - Delivery info cleanup after send()
 - connect / disconnect lifecycle
@@ -29,9 +29,11 @@ from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import MessageEvent, MessageType, SendResult
 from gateway.platforms.webhook import (
     WebhookAdapter,
-    _INSECURE_NO_AUTH,
     check_webhook_requirements,
 )
+
+# _INSECURE_NO_AUTH was removed from webhook.py — use a dummy secret for tests
+_TEST_SECRET = "test-hmac-secret-for-unit-tests"
 
 
 # ---------------------------------------------------------------------------
@@ -100,6 +102,14 @@ def _generic_signature(body: bytes, secret: str) -> str:
     return hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
 
 
+def _signed_github_headers(body: bytes, secret: str, event: str = "push") -> dict:
+    """Return headers with a valid GitHub HMAC signature."""
+    return {
+        "X-GitHub-Event": event,
+        "X-Hub-Signature-256": _github_signature(body, secret),
+    }
+
+
 # ===================================================================
 # Signature validation
 # ===================================================================
@@ -146,10 +156,10 @@ class TestValidateSignature:
 
     def test_validate_no_secret_allows_all(self):
         """When the secret is empty/falsy, the validator is never even called
-        by the handler (secret check is 'if secret and secret != _INSECURE...').
+        by the handler (secret check is 'if secret: validate').
         Verify that an empty secret isn't accidentally passed to the validator."""
         # This tests the semantics: empty secret means skip validation entirely.
-        # The handler code does: if secret and secret != _INSECURE_NO_AUTH: validate
+        # The handler code does: if secret: validate
         # So with an empty secret, _validate_signature is never reached.
         # We just verify the code path is correct by constructing an adapter
         # with no secret and confirming the route config resolves to "".
@@ -242,7 +252,7 @@ class TestEventFilter:
         """Matching event type passes through."""
         routes = {
             "gh": {
-                "secret": _INSECURE_NO_AUTH,
+                "secret": _TEST_SECRET,
                 "events": ["pull_request"],
                 "prompt": "PR: {action}",
             }
@@ -253,10 +263,11 @@ class TestEventFilter:
 
         app = _create_app(adapter)
         async with TestClient(TestServer(app)) as cli:
+            body = json.dumps({"action": "opened"}).encode()
             resp = await cli.post(
                 "/webhooks/gh",
-                json={"action": "opened"},
-                headers={"X-GitHub-Event": "pull_request"},
+                data=body,
+                headers=_signed_github_headers(body, _TEST_SECRET, "pull_request"),
             )
             assert resp.status == 202
 
@@ -265,7 +276,7 @@ class TestEventFilter:
         """Non-matching event type returns 200 with status=ignored."""
         routes = {
             "gh": {
-                "secret": _INSECURE_NO_AUTH,
+                "secret": _TEST_SECRET,
                 "events": ["pull_request"],
                 "prompt": "test",
             }
@@ -274,10 +285,11 @@ class TestEventFilter:
 
         app = _create_app(adapter)
         async with TestClient(TestServer(app)) as cli:
+            body = json.dumps({"action": "opened"}).encode()
             resp = await cli.post(
                 "/webhooks/gh",
-                json={"action": "opened"},
-                headers={"X-GitHub-Event": "push"},
+                data=body,
+                headers=_signed_github_headers(body, _TEST_SECRET, "push"),
             )
             assert resp.status == 200
             data = await resp.json()
@@ -288,7 +300,7 @@ class TestEventFilter:
         """No events list → accept any event type."""
         routes = {
             "all": {
-                "secret": _INSECURE_NO_AUTH,
+                "secret": _TEST_SECRET,
                 "prompt": "got it",
             }
         }
@@ -297,10 +309,11 @@ class TestEventFilter:
 
         app = _create_app(adapter)
         async with TestClient(TestServer(app)) as cli:
+            body = json.dumps({"action": "any"}).encode()
             resp = await cli.post(
                 "/webhooks/all",
-                json={"action": "any"},
-                headers={"X-GitHub-Event": "whatever"},
+                data=body,
+                headers=_signed_github_headers(body, _TEST_SECRET, "whatever"),
             )
             assert resp.status == 202
 
@@ -315,22 +328,28 @@ class TestHTTPHandling:
     @pytest.mark.asyncio
     async def test_unknown_route_returns_404(self):
         """POST to an unknown route returns 404."""
-        adapter = _make_adapter(routes={"real": {"secret": _INSECURE_NO_AUTH, "prompt": "x"}})
+        adapter = _make_adapter(routes={"real": {"secret": _TEST_SECRET, "prompt": "x"}})
         app = _create_app(adapter)
         async with TestClient(TestServer(app)) as cli:
-            resp = await cli.post("/webhooks/nonexistent", json={"a": 1})
+            body = json.dumps({"a": 1}).encode()
+            resp = await cli.post("/webhooks/nonexistent", data=body)
             assert resp.status == 404
 
     @pytest.mark.asyncio
     async def test_webhook_handler_returns_202(self):
         """Valid request returns 202 Accepted."""
-        routes = {"test": {"secret": _INSECURE_NO_AUTH, "prompt": "hi"}}
+        routes = {"test": {"secret": _TEST_SECRET, "prompt": "hi"}}
         adapter = _make_adapter(routes=routes)
         adapter.handle_message = AsyncMock()
 
         app = _create_app(adapter)
         async with TestClient(TestServer(app)) as cli:
-            resp = await cli.post("/webhooks/test", json={"data": "value"})
+            body = json.dumps({"data": "value"}).encode()
+            resp = await cli.post(
+                "/webhooks/test",
+                data=body,
+                headers=_signed_github_headers(body, _TEST_SECRET),
+            )
             assert resp.status == 202
             data = await resp.json()
             assert data["status"] == "accepted"
@@ -351,7 +370,7 @@ class TestHTTPHandling:
     @pytest.mark.asyncio
     async def test_connect_starts_server(self):
         """connect() starts the HTTP listener and marks adapter as connected."""
-        routes = {"r1": {"secret": _INSECURE_NO_AUTH, "prompt": "x"}}
+        routes = {"r1": {"secret": _TEST_SECRET, "prompt": "x"}}
         adapter = _make_adapter(routes=routes, port=0)
         # Use port 0 — the OS picks a free port, but aiohttp requires a real bind.
         # We just test that the method completes and marks connected.
@@ -396,17 +415,18 @@ class TestIdempotency:
     @pytest.mark.asyncio
     async def test_duplicate_delivery_id_returns_200(self):
         """Second request with same delivery ID returns 200 duplicate."""
-        routes = {"idem": {"secret": _INSECURE_NO_AUTH, "prompt": "test"}}
+        routes = {"idem": {"secret": _TEST_SECRET, "prompt": "test"}}
         adapter = _make_adapter(routes=routes)
         adapter.handle_message = AsyncMock()
 
         app = _create_app(adapter)
         async with TestClient(TestServer(app)) as cli:
-            headers = {"X-GitHub-Delivery": "delivery-123"}
-            resp1 = await cli.post("/webhooks/idem", json={"a": 1}, headers=headers)
+            body = json.dumps({"a": 1}).encode()
+            headers = {**_signed_github_headers(body, _TEST_SECRET), "X-GitHub-Delivery": "delivery-123"}
+            resp1 = await cli.post("/webhooks/idem", data=body, headers=headers)
             assert resp1.status == 202
 
-            resp2 = await cli.post("/webhooks/idem", json={"a": 1}, headers=headers)
+            resp2 = await cli.post("/webhooks/idem", data=body, headers=headers)
             assert resp2.status == 200
             data = await resp2.json()
             assert data["status"] == "duplicate"
@@ -414,22 +434,23 @@ class TestIdempotency:
     @pytest.mark.asyncio
     async def test_expired_delivery_id_allows_reprocess(self):
         """After TTL expires, the same delivery ID is accepted again."""
-        routes = {"idem": {"secret": _INSECURE_NO_AUTH, "prompt": "test"}}
+        routes = {"idem": {"secret": _TEST_SECRET, "prompt": "test"}}
         adapter = _make_adapter(routes=routes)
         adapter._idempotency_ttl = 1  # 1 second TTL for test speed
         adapter.handle_message = AsyncMock()
 
         app = _create_app(adapter)
         async with TestClient(TestServer(app)) as cli:
-            headers = {"X-GitHub-Delivery": "delivery-456"}
+            body = json.dumps({"x": 1}).encode()
+            headers = {**_signed_github_headers(body, _TEST_SECRET), "X-GitHub-Delivery": "delivery-456"}
 
-            resp1 = await cli.post("/webhooks/idem", json={"x": 1}, headers=headers)
+            resp1 = await cli.post("/webhooks/idem", data=body, headers=headers)
             assert resp1.status == 202
 
             # Backdate the cache entry so it appears expired
             adapter._seen_deliveries["delivery-456"] = time.time() - 3700
 
-            resp2 = await cli.post("/webhooks/idem", json={"x": 1}, headers=headers)
+            resp2 = await cli.post("/webhooks/idem", data=body, headers=headers)
             assert resp2.status == 202  # re-accepted
 
 
@@ -443,7 +464,7 @@ class TestRateLimiting:
     @pytest.mark.asyncio
     async def test_rate_limit_rejects_excess(self):
         """Exceeding the rate limit returns 429."""
-        routes = {"limited": {"secret": _INSECURE_NO_AUTH, "prompt": "test"}}
+        routes = {"limited": {"secret": _TEST_SECRET, "prompt": "test"}}
         adapter = _make_adapter(routes=routes, rate_limit=2)
         adapter.handle_message = AsyncMock()
 
@@ -451,44 +472,48 @@ class TestRateLimiting:
         async with TestClient(TestServer(app)) as cli:
             # Two requests within limit
             for i in range(2):
+                body = json.dumps({"n": i}).encode()
                 resp = await cli.post(
                     "/webhooks/limited",
-                    json={"n": i},
-                    headers={"X-GitHub-Delivery": f"d-{i}"},
+                    data=body,
+                    headers={**_signed_github_headers(body, _TEST_SECRET), "X-GitHub-Delivery": f"d-{i}"},
                 )
                 assert resp.status == 202, f"Request {i} should be accepted"
 
             # Third request should be rate-limited
+            body99 = json.dumps({"n": 99}).encode()
             resp = await cli.post(
                 "/webhooks/limited",
-                json={"n": 99},
-                headers={"X-GitHub-Delivery": "d-99"},
+                data=body99,
+                headers={**_signed_github_headers(body99, _TEST_SECRET), "X-GitHub-Delivery": "d-99"},
             )
             assert resp.status == 429
 
     @pytest.mark.asyncio
     async def test_rate_limit_window_resets(self):
         """After the 60-second window passes, requests are allowed again."""
-        routes = {"limited": {"secret": _INSECURE_NO_AUTH, "prompt": "test"}}
+        routes = {"limited": {"secret": _TEST_SECRET, "prompt": "test"}}
         adapter = _make_adapter(routes=routes, rate_limit=1)
         adapter.handle_message = AsyncMock()
 
         app = _create_app(adapter)
         async with TestClient(TestServer(app)) as cli:
+            body_a = json.dumps({"n": 1}).encode()
             resp = await cli.post(
                 "/webhooks/limited",
-                json={"n": 1},
-                headers={"X-GitHub-Delivery": "d-a"},
+                data=body_a,
+                headers={**_signed_github_headers(body_a, _TEST_SECRET), "X-GitHub-Delivery": "d-a"},
             )
             assert resp.status == 202
 
             # Backdate all rate-limit timestamps to > 60 seconds ago
             adapter._rate_counts["limited"] = [time.time() - 120]
 
+            body_b = json.dumps({"n": 2}).encode()
             resp = await cli.post(
                 "/webhooks/limited",
-                json={"n": 2},
-                headers={"X-GitHub-Delivery": "d-b"},
+                data=body_b,
+                headers={**_signed_github_headers(body_b, _TEST_SECRET), "X-GitHub-Delivery": "d-b"},
             )
             assert resp.status == 202  # allowed again
 
@@ -503,39 +528,40 @@ class TestBodySize:
     @pytest.mark.asyncio
     async def test_oversized_payload_rejected(self):
         """Content-Length > max_body_bytes returns 413."""
-        routes = {"big": {"secret": _INSECURE_NO_AUTH, "prompt": "test"}}
+        routes = {"big": {"secret": _TEST_SECRET, "prompt": "test"}}
         adapter = _make_adapter(routes=routes, max_body_bytes=100)
 
         app = _create_app(adapter)
         async with TestClient(TestServer(app)) as cli:
             large_payload = {"data": "x" * 200}
+            body = json.dumps(large_payload).encode()
             resp = await cli.post(
                 "/webhooks/big",
-                json=large_payload,
-                headers={"Content-Length": "999999"},
+                data=body,
+                headers={**_signed_github_headers(body, _TEST_SECRET), "Content-Length": "999999"},
             )
             assert resp.status == 413
 
 
 # ===================================================================
-# INSECURE_NO_AUTH
+# Secret-required authentication
 # ===================================================================
 
 
 class TestInsecureNoAuth:
 
     @pytest.mark.asyncio
-    async def test_insecure_no_auth_skips_validation(self):
-        """Setting secret to _INSECURE_NO_AUTH bypasses signature check."""
-        routes = {"open": {"secret": _INSECURE_NO_AUTH, "prompt": "hello"}}
+    async def test_secret_requires_signature(self):
+        """With a real secret, missing signature is rejected (no _INSECURE_NO_AUTH bypass)."""
+        routes = {"open": {"secret": _TEST_SECRET, "prompt": "hello"}}
         adapter = _make_adapter(routes=routes)
         adapter.handle_message = AsyncMock()
 
         app = _create_app(adapter)
         async with TestClient(TestServer(app)) as cli:
-            # No signature header at all — should still be accepted
+            # No signature header — should be rejected (403)
             resp = await cli.post("/webhooks/open", json={"test": True})
-            assert resp.status == 202
+            assert resp.status == 403
 
 
 # ===================================================================
@@ -548,7 +574,7 @@ class TestSessionIsolation:
     @pytest.mark.asyncio
     async def test_concurrent_webhooks_get_independent_sessions(self):
         """Two events on the same route produce different session keys."""
-        routes = {"ci": {"secret": _INSECURE_NO_AUTH, "prompt": "build"}}
+        routes = {"ci": {"secret": _TEST_SECRET, "prompt": "build"}}
         adapter = _make_adapter(routes=routes)
 
         captured_events = []
@@ -560,17 +586,19 @@ class TestSessionIsolation:
 
         app = _create_app(adapter)
         async with TestClient(TestServer(app)) as cli:
+            body1 = json.dumps({"ref": "main"}).encode()
             resp1 = await cli.post(
                 "/webhooks/ci",
-                json={"ref": "main"},
-                headers={"X-GitHub-Delivery": "aaa-111"},
+                data=body1,
+                headers={**_signed_github_headers(body1, _TEST_SECRET), "X-GitHub-Delivery": "aaa-111"},
             )
             assert resp1.status == 202
 
+            body2 = json.dumps({"ref": "dev"}).encode()
             resp2 = await cli.post(
                 "/webhooks/ci",
-                json={"ref": "dev"},
-                headers={"X-GitHub-Delivery": "bbb-222"},
+                data=body2,
+                headers={**_signed_github_headers(body2, _TEST_SECRET), "X-GitHub-Delivery": "bbb-222"},
             )
             assert resp2.status == 202
 

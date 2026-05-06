@@ -17,6 +17,7 @@ import subprocess
 import sys
 import uuid
 from abc import ABC, abstractmethod
+from pathlib import Path
 from urllib.parse import urlsplit
 
 from utils import normalize_proxy_url
@@ -32,6 +33,48 @@ _AUDIO_EXTS = frozenset({'.ogg', '.opus', '.mp3', '.wav', '.m4a', '.flac'})
 # delivered as a regular document.
 _TELEGRAM_AUDIO_ATTACHMENT_EXTS = frozenset({'.mp3', '.m4a'})
 _TELEGRAM_VOICE_EXTS = frozenset({'.ogg', '.opus'})
+
+# ---------------------------------------------------------------------------
+# Media path authorization — prevents prompt-injection attacks from
+# exfiltrating arbitrary host files via the media delivery pipeline.
+# ---------------------------------------------------------------------------
+
+# Directories whose resolved contents may be served as media attachments.
+# Platform adapters populate this at startup (e.g. cache dirs for images,
+# audio, screenshots).  The security boundary is enforced by
+# ``_is_authorized_media_path()``.
+_AUTHORIZED_MEDIA_DIRS: tuple = ()
+
+
+def _is_authorized_media_path(path: str) -> bool:
+    """Return *True* if *path* resolves inside one of the authorized media directories.
+
+    This is the security boundary that prevents prompt-injection attacks from
+    exfiltrating arbitrary host files via the media delivery pipeline.
+
+    Checks:
+    - Path must be absolute after resolution
+    - Resolved path must be inside at least one ``_AUTHORIZED_MEDIA_DIRS`` entry
+    - Symlinks are followed (via ``Path.resolve()``)
+    - Empty / garbage / relative inputs return ``False``
+    - ``OSError`` during resolve returns ``False``
+    """
+    if not path:
+        return False
+    try:
+        resolved = Path(path).resolve()
+    except (OSError, ValueError):
+        return False
+    if not resolved.is_absolute():
+        return False
+    for allowed_dir in _AUTHORIZED_MEDIA_DIRS:
+        try:
+            # Path.is_relative_to() is Python 3.9+
+            if resolved == allowed_dir or str(resolved).startswith(str(allowed_dir) + os.sep):
+                return True
+        except (TypeError, AttributeError):
+            continue
+    return False
 
 
 def _platform_name(platform) -> str:

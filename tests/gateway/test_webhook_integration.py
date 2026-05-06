@@ -24,7 +24,10 @@ from gateway.config import (
     PlatformConfig,
 )
 from gateway.platforms.base import MessageEvent, MessageType, SendResult
-from gateway.platforms.webhook import WebhookAdapter, _INSECURE_NO_AUTH
+from gateway.platforms.webhook import WebhookAdapter
+
+
+_TEST_SECRET = "test-hmac-secret-for-unit-tests"
 
 
 # ---------------------------------------------------------------------------
@@ -52,6 +55,14 @@ def _github_signature(body: bytes, secret: str) -> str:
     return "sha256=" + hmac.new(
         secret.encode(), body, hashlib.sha256
     ).hexdigest()
+
+
+def _signed_github_headers(body: bytes, secret: str, event: str = "push") -> dict:
+    """Return headers with a valid GitHub HMAC signature."""
+    return {
+        "X-GitHub-Event": event,
+        "X-Hub-Signature-256": _github_signature(body, secret),
+    }
 
 
 # A realistic GitHub pull_request event payload (trimmed)
@@ -157,7 +168,7 @@ class TestSkillsInjection:
         prompt instead of the raw template render."""
         routes = {
             "pr-review": {
-                "secret": _INSECURE_NO_AUTH,
+                "secret": _TEST_SECRET,
                 "events": ["pull_request"],
                 "prompt": "Review this PR: {pull_request.title}",
                 "skills": ["code-review"],
@@ -187,11 +198,13 @@ class TestSkillsInjection:
         ):
             app = _create_app(adapter)
             async with TestClient(TestServer(app)) as cli:
+                body = json.dumps(GITHUB_PR_PAYLOAD).encode()
                 resp = await cli.post(
                     "/webhooks/pr-review",
-                    json=GITHUB_PR_PAYLOAD,
+                    data=body,
                     headers={
-                        "X-GitHub-Event": "pull_request",
+                        **_signed_github_headers(body, _TEST_SECRET, "pull_request"),
+                        "Content-Type": "application/json",
                         "X-GitHub-Delivery": "skill-test-001",
                     },
                 )
@@ -218,7 +231,7 @@ class TestCrossPlatformDelivery:
         Telegram adapter via gateway_runner.adapters."""
         routes = {
             "alerts": {
-                "secret": _INSECURE_NO_AUTH,
+                "secret": _TEST_SECRET,
                 "prompt": "Alert: {message}",
                 "deliver": "telegram",
                 "deliver_extra": {"chat_id": "12345"},
@@ -241,10 +254,15 @@ class TestCrossPlatformDelivery:
         # First, simulate a webhook POST to set up delivery_info
         app = _create_app(adapter)
         async with TestClient(TestServer(app)) as cli:
+            body = json.dumps({"message": "Server is on fire!"}).encode()
             resp = await cli.post(
                 "/webhooks/alerts",
-                json={"message": "Server is on fire!"},
-                headers={"X-GitHub-Delivery": "alert-001"},
+                data=body,
+                headers={
+                    **_signed_github_headers(body, _TEST_SECRET, "push"),
+                    "Content-Type": "application/json",
+                    "X-GitHub-Delivery": "alert-001",
+                },
             )
             assert resp.status == 202
 
@@ -276,7 +294,7 @@ class TestGitHubCommentDelivery:
         ``gh pr comment`` via subprocess.run (mocked)."""
         routes = {
             "pr-bot": {
-                "secret": _INSECURE_NO_AUTH,
+                "secret": _TEST_SECRET,
                 "prompt": "Review: {pull_request.title}",
                 "deliver": "github_comment",
                 "deliver_extra": {
@@ -291,11 +309,13 @@ class TestGitHubCommentDelivery:
         # POST a webhook to set up delivery info
         app = _create_app(adapter)
         async with TestClient(TestServer(app)) as cli:
+            body = json.dumps(GITHUB_PR_PAYLOAD).encode()
             resp = await cli.post(
                 "/webhooks/pr-bot",
-                json=GITHUB_PR_PAYLOAD,
+                data=body,
                 headers={
-                    "X-GitHub-Event": "pull_request",
+                    **_signed_github_headers(body, _TEST_SECRET, "pull_request"),
+                    "Content-Type": "application/json",
                     "X-GitHub-Delivery": "gh-comment-001",
                 },
             )
