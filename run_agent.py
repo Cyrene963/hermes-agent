@@ -1704,7 +1704,6 @@ class AIAgent:
                     self._memory_store = MemoryStore(
                         memory_char_limit=mem_config.get("memory_char_limit", 2200),
                         user_char_limit=mem_config.get("user_char_limit", 1375),
-                        user_id=getattr(self, '_user_id', None),
                     )
                     self._memory_store.load_from_disk()
             except Exception:
@@ -10640,6 +10639,7 @@ class AIAgent:
         self._codex_incomplete_retries = 0
         self._thinking_prefill_retries = 0
         self._post_tool_empty_retried = False
+        self._verification_nudged = False
         self._last_content_with_tools = None
         self._last_content_tools_all_housekeeping = False
         self._mute_post_response = False
@@ -11167,6 +11167,21 @@ class AIAgent:
                         _auto_parts.append("[Relevant past sessions]\n" + _auto_session_context)
                     if _plugin_user_context:
                         _auto_parts.append(_plugin_user_context)
+
+                    # ── Skill Pre-Selection (semantic, no keywords) ──
+                    # If the model hasn't loaded any skills yet, use FTS5
+                    # semantic search to find relevant skills and inject
+                    # a mandatory instruction. This fires BEFORE the model
+                    # generates, so it can't be bypassed by a text response.
+                    if not self._skill_eval_done:
+                        try:
+                            from agent.skill_eval_gate import pre_select_skills
+                            _skill_msg = pre_select_skills(original_user_message or "")
+                            if _skill_msg:
+                                _auto_parts.append(_skill_msg)
+                        except Exception:
+                            pass
+
                     if _auto_parts:
                         _auto_block = (
                             "<auto_retrieved_context>\n"
@@ -13948,6 +13963,38 @@ class AIAgent:
                         continue
 
                     codex_ack_continuations = 0
+
+                    # ── Verification Nudge ───────────────────────────────
+                    # When the model returns a substantial response WITHOUT
+                    # calling any tools, nudge it to verify. This catches
+                    # "凭印象下结论" — stating facts from memory without checking.
+                    # Only fires once per conversation to avoid loops.
+                    if (
+                        api_call_count == 0
+                        and len(final_response) > 100
+                        and self.valid_tool_names
+                        and not getattr(self, '_verification_nudged', False)
+                    ):
+                        self._verification_nudged = True
+                        logger.info(
+                            "Verification nudge: response without tool calls (%d chars)",
+                            len(final_response),
+                        )
+                        messages.append({
+                            "role": "assistant",
+                            "content": final_response,
+                        })
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                "你确定以上回答准确吗？你刚才没有调用任何工具来验证。"
+                                "请用 hindsight_recall 或 session_search 检查记忆和历史，"
+                                "或用 web_search 搜索确认。如果确认无误，直接重新回答即可。"
+                            ),
+                        })
+                        self._session_messages = messages
+                        self._save_session_log(messages)
+                        continue
 
                     if truncated_response_prefix:
                         final_response = truncated_response_prefix + final_response

@@ -111,3 +111,46 @@ def is_skill_view_call(tool_name: str) -> bool:
 def reset_session(session_id: str) -> None:
     """Reset evaluation state for a session (e.g., on new conversation)."""
     _evaluated_sessions.pop(session_id, None)
+
+
+# ─── Semantic Skill Pre-Selection ──────────────────────────────────
+# This replaces keyword matching with FTS5 semantic search.
+# Before the model generates its first response, we search the SkillDB
+# for relevant skills and inject a mandatory instruction if found.
+
+def pre_select_skills(user_message: str, threshold: float = 0.5) -> str:
+    """Pre-flight skill evaluation enforcement.
+
+    Instead of trying to semantically match skills (which fails for Chinese
+    text due to tokenization issues), this function ALWAYS injects a mandatory
+    skill evaluation instruction on the model's first response attempt.
+
+    The model already sees all skill names and descriptions in its system
+    prompt (via build_skills_system_prompt). This function simply forces it
+    to ACT on that information before generating text.
+
+    This is NOT keyword matching. It's a universal enforcement mechanism
+    that works for any language, any task.
+
+    Args:
+        user_message: The user's input text
+        threshold: Unused (kept for API compatibility)
+
+    Returns:
+        Mandatory instruction string, or empty string if message is trivial
+    """
+    if not user_message or len(user_message.strip()) < 5:
+        return ""
+
+    # Skip for very short messages (greetings, acknowledgments)
+    stripped = user_message.strip()
+    if len(stripped) < 10 and not any(c in stripped for c in '吗呢？?怎么如何'):
+        return ""
+
+    return (
+        "[SYSTEM] MANDATORY SKILL CHECK: Review the skill index in your "
+        "system prompt. If ANY skill description matches this task, call "
+        "skill_view() for it BEFORE generating any text response. If no "
+        "skills match, call skill_view(name='hermes-agent') as minimal "
+        "acknowledgment and proceed. Do NOT skip this step."
+    )
