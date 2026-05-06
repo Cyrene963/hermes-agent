@@ -145,6 +145,7 @@ from agent.model_metadata import (
     parse_available_output_tokens_from_error,
     save_context_length, is_local_endpoint,
     query_ollama_num_ctx,
+    model_requires_max_completion_tokens,
 )
 from agent.context_compressor import ContextCompressor
 from agent.subdirectory_hints import SubdirectoryHintTracker
@@ -3047,7 +3048,9 @@ class AIAgent:
         OpenAI-compatible endpoint. OpenRouter, local models, and older
         OpenAI models use 'max_tokens'.
         """
-        if self._is_direct_openai_url() or self._is_azure_openai_url():
+        if (self._is_direct_openai_url()
+                or self._is_azure_openai_url()
+                or model_requires_max_completion_tokens(self.model)):
             return {"max_completion_tokens": value}
         return {"max_tokens": value}
 
@@ -7840,6 +7843,14 @@ class AIAgent:
         ``gateway/run.py``), so this restoration IS needed there too.
         """
         if not self._fallback_activated:
+            # Reset the chain index even when no fallback was activated this
+            # turn.  Without this, a turn where _try_activate_fallback() was
+            # called but returned False (chain exhausted or provider not
+            # configured) leaves _fallback_index >= len(_fallback_chain) while
+            # _fallback_activated stays False.  The next turn skips this block
+            # entirely, stranding the index and silently blocking all future
+            # fallback attempts for the session.  Fixes #20465.
+            self._fallback_index = 0
             return False
 
         if getattr(self, "_rate_limited_until", 0) > time.monotonic():
@@ -9467,6 +9478,7 @@ class AIAgent:
             acp_command=function_args.get("acp_command"),
             acp_args=function_args.get("acp_args"),
             role=function_args.get("role"),
+            model=function_args.get("model"),
             parent_agent=self,
         )
 

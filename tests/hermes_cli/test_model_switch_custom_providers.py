@@ -506,3 +506,165 @@ def test_lmstudio_picker_skips_probe_when_not_configured(monkeypatch):
     )
 
     assert "base_url" not in captured
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Section 4: live model probe for custom_providers entries
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_custom_provider_probes_live_models_endpoint(monkeypatch):
+    """Custom providers should probe /v1/models and merge live results."""
+    monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
+    monkeypatch.setattr(providers_mod, "HERMES_OVERLAYS", {})
+    monkeypatch.setattr(
+        "hermes_cli.models.fetch_api_models",
+        lambda api_key, base_url, **kw: ["live-model-1", "live-model-2", "live-model-3"],
+    )
+
+    providers = list_authenticated_providers(
+        current_provider="openai",
+        user_providers={},
+        custom_providers=[
+            {
+                "name": "My vLLM Server",
+                "base_url": "http://localhost:8000/v1",
+                "api_key": "test-key",
+                "model": "config-model-1",
+            }
+        ],
+        max_models=50,
+    )
+
+    custom = [p for p in providers if "vllm" in p["name"].lower() or "vllm" in p["slug"].lower()]
+    assert len(custom) == 1
+    row = custom[0]
+    # Config model preserved
+    assert "config-model-1" in row["models"]
+    # Live models merged in
+    assert "live-model-1" in row["models"]
+    assert "live-model-2" in row["models"]
+    assert "live-model-3" in row["models"]
+    assert row["total_models"] == 4
+
+
+def test_custom_provider_live_probe_does_not_duplicate_existing(monkeypatch):
+    """Live probe should not duplicate models already present from config."""
+    monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
+    monkeypatch.setattr(providers_mod, "HERMES_OVERLAYS", {})
+    monkeypatch.setattr(
+        "hermes_cli.models.fetch_api_models",
+        lambda api_key, base_url, **kw: ["model-a", "model-b"],
+    )
+
+    providers = list_authenticated_providers(
+        current_provider="openai",
+        user_providers={},
+        custom_providers=[
+            {
+                "name": "My Server",
+                "base_url": "http://localhost:8000/v1",
+                "api_key": "test-key",
+                "model": "model-a",
+            }
+        ],
+        max_models=50,
+    )
+
+    custom = [p for p in providers if p["source"] == "user-config" and "my server" in p["name"].lower()]
+    assert len(custom) == 1
+    assert custom[0]["models"].count("model-a") == 1
+    assert "model-b" in custom[0]["models"]
+    assert custom[0]["total_models"] == 2
+
+
+def test_custom_provider_live_probe_skipped_without_api_key(monkeypatch):
+    """Without api_key, live probe is skipped — only config models shown."""
+    monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
+    monkeypatch.setattr(providers_mod, "HERMES_OVERLAYS", {})
+
+    probe_called = []
+
+    def mock_fetch(api_key, base_url, **kw):
+        probe_called.append(True)
+        return ["should-not-appear"]
+
+    monkeypatch.setattr("hermes_cli.models.fetch_api_models", mock_fetch)
+
+    providers = list_authenticated_providers(
+        current_provider="openai",
+        user_providers={},
+        custom_providers=[
+            {
+                "name": "No Key Server",
+                "base_url": "http://localhost:8000/v1",
+                "model": "only-this-model",
+            }
+        ],
+        max_models=50,
+    )
+
+    custom = [p for p in providers if p["source"] == "user-config" and "no key" in p["name"].lower()]
+    assert len(custom) == 1
+    assert custom[0]["models"] == ["only-this-model"]
+    assert not probe_called
+
+
+def test_custom_provider_live_probe_failure_falls_back_to_config(monkeypatch):
+    """If live probe fails, fall back gracefully to config models."""
+    monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
+    monkeypatch.setattr(providers_mod, "HERMES_OVERLAYS", {})
+
+    def mock_fetch_fail(api_key, base_url, **kw):
+        raise ConnectionError("Server unreachable")
+
+    monkeypatch.setattr("hermes_cli.models.fetch_api_models", mock_fetch_fail)
+
+    providers = list_authenticated_providers(
+        current_provider="openai",
+        user_providers={},
+        custom_providers=[
+            {
+                "name": "Offline Server",
+                "base_url": "http://localhost:8000/v1",
+                "api_key": "test-key",
+                "model": "fallback-model",
+            }
+        ],
+        max_models=50,
+    )
+
+    custom = [p for p in providers if p["source"] == "user-config" and "offline" in p["name"].lower()]
+    assert len(custom) == 1
+    assert custom[0]["models"] == ["fallback-model"]
+    assert custom[0]["total_models"] == 1
+
+
+def test_custom_provider_resolves_key_env_for_live_probe(monkeypatch):
+    """Custom providers using key_env should still probe /v1/models."""
+    monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
+    monkeypatch.setattr(providers_mod, "HERMES_OVERLAYS", {})
+    monkeypatch.setenv("MY_VLLM_KEY", "resolved-secret")
+    monkeypatch.setattr(
+        "hermes_cli.models.fetch_api_models",
+        lambda api_key, base_url, **kw: ["env-model-1", "env-model-2"],
+    )
+
+    providers = list_authenticated_providers(
+        current_provider="openai",
+        user_providers={},
+        custom_providers=[
+            {
+                "name": "Env Key Server",
+                "base_url": "http://localhost:8000/v1",
+                "key_env": "MY_VLLM_KEY",
+                "model": "config-only",
+            }
+        ],
+        max_models=50,
+    )
+
+    custom = [p for p in providers if p["source"] == "user-config" and "env key" in p["name"].lower()]
+    assert len(custom) == 1
+    assert "config-only" in custom[0]["models"]
+    assert "env-model-1" in custom[0]["models"]
+    assert "env-model-2" in custom[0]["models"]

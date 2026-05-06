@@ -554,6 +554,18 @@ class TrajectoryCompressor:
         return "\n\n".join(parts)
 
     @staticmethod
+    def _extract_content(response) -> str:
+        """Extract text from an LLM response, handling reasoning models."""
+        try:
+            from agent.auxiliary_client import extract_content_or_reasoning
+            return extract_content_or_reasoning(response)
+        except Exception:
+            content = response.choices[0].message.content
+            if not isinstance(content, str):
+                content = str(content) if content else ""
+            return content.strip()
+
+    @staticmethod
     def _coerce_summary_content(content: Any) -> str:
         """Normalize summary-model output to a safe string."""
         if not isinstance(content, str):
@@ -624,7 +636,7 @@ Write only the summary, starting with "[CONTEXT SUMMARY]:" prefix."""
                         _create_kwargs["temperature"] = summary_temperature
                     response = self.client.chat.completions.create(**_create_kwargs)
                 
-                summary = self._coerce_summary_content(response.choices[0].message.content)
+                summary = self._coerce_summary_content(self._extract_content(response))
                 return self._ensure_summary_prefix(summary)
                 
             except Exception as e:
@@ -693,7 +705,7 @@ Write only the summary, starting with "[CONTEXT SUMMARY]:" prefix."""
                         _create_kwargs["temperature"] = summary_temperature
                     response = await self._get_async_client().chat.completions.create(**_create_kwargs)
                 
-                summary = self._coerce_summary_content(response.choices[0].message.content)
+                summary = self._coerce_summary_content(self._extract_content(response))
                 return self._ensure_summary_prefix(summary)
                 
             except Exception as e:

@@ -750,7 +750,7 @@ def _smart_approve(command: str, description: str) -> str:
     (openai/codex#13860).
     """
     try:
-        from agent.auxiliary_client import call_llm
+        from agent.auxiliary_client import call_llm, extract_content_or_reasoning
 
         prompt = f"""You are a security reviewer for an AI coding agent. A terminal command was flagged by pattern matching as potentially dangerous.
 
@@ -773,7 +773,7 @@ Respond with exactly one word: APPROVE, DENY, or ESCALATE"""
             max_tokens=16,
         )
 
-        answer = (response.choices[0].message.content or "").strip().upper()
+        answer = extract_content_or_reasoning(response).strip().upper()
 
         if "APPROVE" in answer:
             return "approve"

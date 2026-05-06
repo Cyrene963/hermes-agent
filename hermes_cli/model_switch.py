@@ -1579,6 +1579,10 @@ def list_authenticated_providers(
             if not raw_name or not api_url:
                 continue
             api_key = (entry.get("api_key") or "").strip()
+            if not api_key:
+                key_env = str(entry.get("key_env", "") or entry.get("api_key_env", "") or "").strip()
+                if key_env:
+                    api_key = os.environ.get(key_env, "").strip()
 
             group_key = (api_url, api_key)
             if group_key not in groups:
@@ -1637,7 +1641,7 @@ def list_authenticated_providers(
                         groups[group_key]["models"].append(m)
 
         _section4_emitted_slugs: set = set()
-        for grp in groups.values():
+        for (grp_url, grp_api_key), grp in groups.items():
             slug = grp["slug"]
             # If the slug is already claimed by a built-in / overlay /
             # user-provider row (sections 1-3), skip this custom group
@@ -1675,6 +1679,20 @@ def list_authenticated_providers(
             _grp_url_norm = _pair_key[1]
             if _grp_url_norm and _grp_url_norm in _builtin_endpoints:
                 continue
+            # Probe the live /v1/models endpoint when credentials are
+            # available — keeps the picker in sync with the server catalog
+            # without requiring every model to be mirrored in config.yaml.
+            # (Mirrors section-3 behavior for user_providers.)
+            if grp["api_url"] and grp_api_key:
+                try:
+                    from hermes_cli.models import fetch_api_models
+                    live_models = fetch_api_models(grp_api_key, grp["api_url"])
+                    if live_models:
+                        for m in live_models:
+                            if m and m not in grp["models"]:
+                                grp["models"].append(m)
+                except Exception:
+                    pass
             results.append({
                 "slug": slug,
                 "name": grp["name"],

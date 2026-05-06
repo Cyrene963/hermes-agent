@@ -414,6 +414,8 @@ def session_search(
         # Group by resolved (parent) session_id, dedup, skip the current
         # session lineage. Compression and delegation create child sessions
         # that still belong to the same active conversation.
+        # We track both: resolved_sid for display/dedup, hit_sid for loading
+        # the actual transcript that contains the matched content (#6507).
         seen_sessions = {}
         for result in raw_results:
             raw_sid = result["session_id"]
@@ -427,25 +429,58 @@ def session_search(
             if resolved_sid not in seen_sessions:
                 result = dict(result)
                 result["session_id"] = resolved_sid
+                # Remember the actual hit session so we can load its transcript
+                result["hit_session_id"] = raw_sid
                 seen_sessions[resolved_sid] = result
             if len(seen_sessions) >= limit:
                 break
 
         # Prepare all sessions for parallel summarization
         tasks = []
-        for session_id, match_info in seen_sessions.items():
+        for resolved_sid, match_info in seen_sessions.items():
             try:
-                messages = db.get_messages_as_conversation(session_id)
+                hit_sid = match_info.get("hit_session_id", resolved_sid)
+
+                # Load the transcript from the session that actually matched,
+                # not just the resolved root, so the auxiliary LLM sees the
+                # content that triggered the FTS5 hit (#6507).
+                messages = db.get_messages_as_conversation(hit_sid)
+                if not messages:
+                    # Fallback: try the resolved root session
+                    messages = db.get_messages_as_conversation(resolved_sid)
                 if not messages:
                     continue
-                session_meta = db.get_session(session_id) or {}
+
                 conversation_text = _format_conversation(messages)
+
+                # If the hit came from a child session, prepend a short
+                # context prefix from the root session so the summarizer
+                # has continuity without losing the matched content.
+                if hit_sid != resolved_sid:
+                    try:
+                        root_msgs = db.get_messages_as_conversation(resolved_sid)
+                        if root_msgs:
+                            root_text = _format_conversation(root_msgs)
+                            # Keep the root prefix short — it's context, not the focus
+                            root_prefix = root_text[:2000]
+                            conversation_text = (
+                                f"[Earlier conversation in root session {resolved_sid}]\n"
+                                f"{root_prefix}\n\n"
+                                f"---\n"
+                                f"[Matched content in session {hit_sid}]\n"
+                                f"{conversation_text}"
+                            )
+                    except Exception:
+                        # Graceful degradation: use the hit session text as-is
+                        pass
+
                 conversation_text = _truncate_around_matches(conversation_text, query)
-                tasks.append((session_id, match_info, conversation_text, session_meta))
+                session_meta = db.get_session(resolved_sid) or {}
+                tasks.append((resolved_sid, match_info, conversation_text, session_meta))
             except Exception as e:
                 logging.warning(
                     "Failed to prepare session %s: %s",
-                    session_id,
+                    resolved_sid,
                     e,
                     exc_info=True,
                 )

@@ -17,23 +17,102 @@ def test_version_string_no_v_prefix():
 
 
 def test_check_for_updates_uses_cache(tmp_path, monkeypatch):
-    """When cache is fresh, check_for_updates should return cached value without calling git."""
-    from hermes_cli.banner import check_for_updates
+    """When cache is fresh AND HEAD-bound, check_for_updates returns cached value without git fetch."""
+    import hermes_cli.banner as banner
 
-    # Create a fake git repo and fresh cache
+    # Create a fake git repo and fresh cache bound to the current HEAD
     repo_dir = tmp_path / "hermes-agent"
     repo_dir.mkdir()
     (repo_dir / ".git").mkdir()
 
     cache_file = tmp_path / ".update_check"
-    cache_file.write_text(json.dumps({"ts": time.time(), "behind": 3}))
+    cache_file.write_text(json.dumps({
+        "ts": time.time(), "behind": 3, "rev": None, "local_head": "abc12345",
+    }))
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(banner, "_current_local_head_short", lambda: "abc12345")
     with patch("hermes_cli.banner.subprocess.run") as mock_run:
-        result = check_for_updates()
+        result = banner.check_for_updates()
 
     assert result == 3
     mock_run.assert_not_called()
+
+
+def test_check_for_updates_legacy_cache_invalidated(tmp_path, monkeypatch):
+    """Caches without a ``local_head`` field are treated as stale so the
+    HEAD-binding contract takes effect on the very next read."""
+    import hermes_cli.banner as banner
+
+    repo_dir = tmp_path / "hermes-agent"
+    repo_dir.mkdir()
+    (repo_dir / ".git").mkdir()
+
+    # Legacy format — no local_head field
+    cache_file = tmp_path / ".update_check"
+    cache_file.write_text(json.dumps({"ts": time.time(), "behind": 3, "rev": None}))
+
+    mock_result = MagicMock(returncode=0, stdout="7\n")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(banner, "_current_local_head_short", lambda: "deadbeef")
+    with patch("hermes_cli.banner.subprocess.run", return_value=mock_result) as mock_run:
+        result = banner.check_for_updates()
+
+    assert result == 7
+    assert mock_run.call_count >= 1  # fetch + rev-list (+ rev-parse for new HEAD field)
+
+
+def test_check_for_updates_invalidates_when_head_moved(tmp_path, monkeypatch):
+    """A `git pull` outside `hermes update` moves HEAD without deleting the
+    cache file. The HEAD-bound cache must reject the stale entry on the
+    next read so the banner reflects the new commit."""
+    import hermes_cli.banner as banner
+
+    repo_dir = tmp_path / "hermes-agent"
+    repo_dir.mkdir()
+    (repo_dir / ".git").mkdir()
+
+    cache_file = tmp_path / ".update_check"
+    cache_file.write_text(json.dumps({
+        "ts": time.time(), "behind": 5, "rev": None, "local_head": "OLDHEAD1",
+    }))
+
+    mock_result = MagicMock(returncode=0, stdout="0\n")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(banner, "_current_local_head_short", lambda: "NEWHEAD2")
+    with patch("hermes_cli.banner.subprocess.run", return_value=mock_result) as mock_run:
+        result = banner.check_for_updates()
+
+    assert result == 0  # post-update count, not the stale `5`
+    assert mock_run.call_count >= 1
+
+
+def test_check_for_updates_writes_local_head_to_cache(tmp_path, monkeypatch):
+    """A fresh check writes the HEAD SHA into the cache so subsequent reads
+    can confirm the cache still matches the current commit."""
+    import hermes_cli.banner as banner
+
+    repo_dir = tmp_path / "hermes-agent"
+    repo_dir.mkdir()
+    (repo_dir / ".git").mkdir()
+    cache_file = tmp_path / ".update_check"
+
+    # subprocess.run is hit three times: fetch, rev-list, rev-parse(HEAD)
+    def _fake_run(cmd, *args, **kwargs):
+        if "rev-list" in cmd:
+            return MagicMock(returncode=0, stdout="2\n")
+        if "rev-parse" in cmd:
+            return MagicMock(returncode=0, stdout="ABCDEF12\n")
+        return MagicMock(returncode=0, stdout="")
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    with patch("hermes_cli.banner.subprocess.run", side_effect=_fake_run):
+        result = banner.check_for_updates()
+
+    assert result == 2
+    cached = json.loads(cache_file.read_text())
+    assert cached["local_head"] == "ABCDEF12"
+    assert cached["behind"] == 2
 
 
 def test_check_for_updates_expired_cache(tmp_path, monkeypatch):
@@ -44,9 +123,10 @@ def test_check_for_updates_expired_cache(tmp_path, monkeypatch):
     repo_dir.mkdir()
     (repo_dir / ".git").mkdir()
 
-    # Write an expired cache (timestamp far in the past)
     cache_file = tmp_path / ".update_check"
-    cache_file.write_text(json.dumps({"ts": 0, "behind": 1}))
+    cache_file.write_text(json.dumps({
+        "ts": 0, "behind": 1, "rev": None, "local_head": "abc12345",
+    }))
 
     mock_result = MagicMock(returncode=0, stdout="5\n")
 
@@ -55,7 +135,8 @@ def test_check_for_updates_expired_cache(tmp_path, monkeypatch):
         result = check_for_updates()
 
     assert result == 5
-    assert mock_run.call_count == 2  # git fetch + git rev-list
+    # fetch + rev-list + rev-parse(HEAD) — last one was added with HEAD-binding
+    assert mock_run.call_count == 3
 
 
 def test_check_for_updates_no_git_dir(tmp_path, monkeypatch):
@@ -99,8 +180,10 @@ def test_prefetch_non_blocking():
     # Reset module state
     banner._update_result = None
     banner._update_check_done = threading.Event()
+    banner._update_result_head = None
 
-    with patch.object(banner, "check_for_updates", return_value=5):
+    with patch.object(banner, "check_for_updates", return_value=5), \
+         patch.object(banner, "_current_local_head_short", return_value="HEAD0001"):
         start = time.monotonic()
         banner.prefetch_update_check()
         elapsed = time.monotonic() - start
@@ -111,6 +194,106 @@ def test_prefetch_non_blocking():
         # Wait for the background thread to finish
         banner._update_check_done.wait(timeout=5)
         assert banner._update_result == 5
+        assert banner._update_result_head == "HEAD0001"
+
+
+def test_get_update_result_refreshes_after_head_moves():
+    """Long-running TUI/gateway: when local HEAD has moved since the
+    prefetch (e.g. ``hermes update`` ran in a sibling process), the next
+    ``get_update_result`` call should kick a non-blocking refresh so
+    later renders pick up the new value. The refresh runs in a daemon
+    thread on purpose so the caller is never blocked."""
+    import hermes_cli.banner as banner
+
+    # Seed module state as if a prefetch ran when behind=2982 at HEAD=OLD
+    banner._update_result = 2982
+    banner._update_check_done = threading.Event()
+    banner._update_check_done.set()
+    banner._update_result_head = "OLDHEAD1"
+    banner._update_refresh_lock = threading.Lock()
+
+    release_check = threading.Event()
+    refresh_done = threading.Event()
+    refresh_calls = []
+
+    def _fake_check():
+        # Hold the refresh thread until the test releases it so we can
+        # observe both the pre-refresh return value and the post-refresh
+        # state without racing.
+        release_check.wait(timeout=5)
+        refresh_calls.append(time.time())
+        try:
+            return 0
+        finally:
+            refresh_done.set()
+
+    with patch.object(banner, "check_for_updates", side_effect=_fake_check), \
+         patch.object(banner, "_current_local_head_short", return_value="NEWHEAD2"):
+        # Caller returns immediately with the stale snapshot
+        first = banner.get_update_result(timeout=0.0)
+        assert first == 2982
+
+        # Now let the daemon refresh complete and observe the new value
+        release_check.set()
+        assert refresh_done.wait(timeout=5)
+
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            if banner._update_result == 0:
+                break
+            time.sleep(0.02)
+
+    assert banner._update_result == 0
+    assert banner._update_result_head == "NEWHEAD2"
+    assert len(refresh_calls) == 1
+
+
+def test_get_update_result_does_not_block_caller():
+    """The refresh path must not block the caller — even if the underlying
+    update check stalls, ``get_update_result`` returns the cached snapshot
+    in well under a second."""
+    import hermes_cli.banner as banner
+
+    banner._update_result = 99
+    banner._update_check_done = threading.Event()
+    banner._update_check_done.set()
+    banner._update_result_head = "OLDHEAD1"
+    banner._update_refresh_lock = threading.Lock()
+
+    block_forever = threading.Event()
+    try:
+        with patch.object(
+            banner, "check_for_updates",
+            side_effect=lambda: block_forever.wait(timeout=10) or 0,
+        ), patch.object(banner, "_current_local_head_short", return_value="NEWHEAD2"):
+            start = time.monotonic()
+            result = banner.get_update_result(timeout=0.0)
+            elapsed = time.monotonic() - start
+
+        assert result == 99
+        assert elapsed < 0.5
+    finally:
+        # Let the daemon thread exit cleanly so it doesn't leak between tests
+        block_forever.set()
+
+
+def test_get_update_result_no_refresh_when_head_unchanged():
+    """When HEAD hasn't moved, get_update_result must not spawn a refresh
+    thread — the cached value is still bound to the right commit."""
+    import hermes_cli.banner as banner
+
+    banner._update_result = 7
+    banner._update_check_done = threading.Event()
+    banner._update_check_done.set()
+    banner._update_result_head = "STABLE01"
+    banner._update_refresh_lock = threading.Lock()
+
+    with patch.object(banner, "check_for_updates") as mock_check, \
+         patch.object(banner, "_current_local_head_short", return_value="STABLE01"):
+        result = banner.get_update_result(timeout=0.0)
+
+    assert result == 7
+    mock_check.assert_not_called()
 
 
 def test_invalidate_update_cache_clears_all_profiles(tmp_path):

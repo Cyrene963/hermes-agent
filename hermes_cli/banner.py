@@ -185,24 +185,35 @@ def check_for_updates() -> Optional[int]:
     Returns the number of commits behind, ``UPDATE_AVAILABLE_NO_COUNT`` (-1)
     if behind but the count is unknown, ``0`` if up-to-date, or ``None`` if
     the check failed or doesn't apply. Cached for 6 hours.
+
+    For git installs the cache is bound to the local ``HEAD`` SHA: a
+    ``git pull`` outside ``hermes update`` (which doesn't delete the
+    cache file) still invalidates the cached "behind" count.
     """
     hermes_home = get_hermes_home()
     cache_file = hermes_home / ".update_check"
     embedded_rev = os.environ.get("HERMES_REVISION") or None
 
-    # Read cache — invalidate if the embedded rev has changed since last check
     now = time.time()
     try:
         if cache_file.exists():
             cached = json.loads(cache_file.read_text())
-            if (
-                now - cached.get("ts", 0) < _UPDATE_CHECK_CACHE_SECONDS
-                and cached.get("rev") == embedded_rev
-            ):
-                return cached.get("behind")
+            ts_fresh = now - cached.get("ts", 0) < _UPDATE_CHECK_CACHE_SECONDS
+            rev_match = cached.get("rev") == embedded_rev
+            if ts_fresh and rev_match:
+                if embedded_rev is not None:
+                    return cached.get("behind")
+                cached_head = cached.get("local_head")
+                # Legacy caches (no local_head field) fall through to a
+                # refresh so subsequent reads are HEAD-bound. Otherwise
+                # only short-circuit when the cache binds to the current
+                # commit.
+                if cached_head and cached_head == _current_local_head_short():
+                    return cached.get("behind")
     except Exception:
         pass
 
+    local_head = None
     if embedded_rev:
         behind = _check_via_rev(embedded_rev)
     else:
@@ -212,13 +223,27 @@ def check_for_updates() -> Optional[int]:
         if not (repo_dir / ".git").exists():
             return None
         behind = _check_via_local_git(repo_dir)
+        local_head = _git_short_hash(repo_dir, "HEAD")
 
     try:
-        cache_file.write_text(json.dumps({"ts": now, "behind": behind, "rev": embedded_rev}))
+        cache_file.write_text(json.dumps({
+            "ts": now,
+            "behind": behind,
+            "rev": embedded_rev,
+            "local_head": local_head,
+        }))
     except Exception:
         pass
 
     return behind
+
+
+def _current_local_head_short() -> Optional[str]:
+    """Cheap read of local HEAD short hash; never does a fetch."""
+    repo_dir = _resolve_repo_dir()
+    if repo_dir is None:
+        return None
+    return _git_short_hash(repo_dir, "HEAD")
 
 
 def _resolve_repo_dir() -> Optional[Path]:
@@ -346,22 +371,54 @@ def format_banner_version_label() -> str:
 
 _update_result: Optional[int] = None
 _update_check_done = threading.Event()
+_update_result_head: Optional[str] = None
+_update_refresh_lock = threading.Lock()
 
 
 def prefetch_update_check():
     """Kick off update check in a background daemon thread."""
     def _run():
-        global _update_result
+        global _update_result, _update_result_head
+        head = _current_local_head_short()
         _update_result = check_for_updates()
+        _update_result_head = head
         _update_check_done.set()
     t = threading.Thread(target=_run, daemon=True)
     t.start()
 
 
 def get_update_result(timeout: float = 0.5) -> Optional[int]:
-    """Get result of prefetched check. Returns None if not ready."""
+    """Get result of prefetched check. Returns None if not ready.
+
+    In long-running TUI/gateway processes, the in-memory ``_update_result``
+    can outlast a ``hermes update`` (which deletes the on-disk cache) or a
+    manual ``git pull`` (which moves HEAD). Detect both and kick a
+    non-blocking refresh so subsequent renders pick up the fresh value.
+    """
     _update_check_done.wait(timeout=timeout)
+    if _update_check_done.is_set():
+        _maybe_refresh_in_background()
     return _update_result
+
+
+def _maybe_refresh_in_background() -> None:
+    """Trigger a fresh check when local HEAD has moved since the last check."""
+    head_now = _current_local_head_short()
+    if head_now is None or head_now == _update_result_head:
+        return  # cache is still bound to the current commit
+    if not _update_refresh_lock.acquire(blocking=False):
+        return  # another refresh is already in flight
+
+    def _run():
+        global _update_result, _update_result_head
+        try:
+            head = _current_local_head_short()
+            _update_result = check_for_updates()
+            _update_result_head = head
+        finally:
+            _update_refresh_lock.release()
+
+    threading.Thread(target=_run, daemon=True).start()
 
 
 # =========================================================================

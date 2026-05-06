@@ -1848,6 +1848,21 @@ def _refresh_provider_credentials(provider: str) -> bool:
     """Refresh short-lived credentials for OAuth-backed auxiliary providers."""
     normalized = _normalize_aux_provider(provider)
     try:
+        if normalized == "copilot":
+            from hermes_cli.copilot_auth import (
+                _jwt_cache,
+                _token_fingerprint,
+                exchange_copilot_token,
+                resolve_copilot_token,
+            )
+
+            raw_token, _source = resolve_copilot_token()
+            if not str(raw_token or "").strip():
+                return False
+            _jwt_cache.pop(_token_fingerprint(raw_token), None)
+            exchange_copilot_token(raw_token)
+            _evict_cached_clients(normalized)
+            return True
         if normalized == "openai-codex":
             from hermes_cli.auth import resolve_codex_runtime_credentials
 
@@ -1883,6 +1898,31 @@ def _refresh_provider_credentials(provider: str) -> bool:
         logger.debug("Auxiliary provider credential refresh failed for %s: %s", normalized, exc)
         return False
     return False
+
+
+def _auth_refresh_provider_for_route(
+    resolved_provider: Optional[str],
+    client_base_url: str,
+) -> str:
+    """Return the provider whose short-lived credentials should be refreshed.
+
+    Auto-routed auxiliary calls keep ``resolved_provider == "auto"`` even
+    after _get_cached_client() selects a concrete backend. Infer the backend
+    from the selected client's base URL so auth refresh works for auto →
+    Copilot/Codex/etc. routes too.
+    """
+    normalized = _normalize_aux_provider(resolved_provider)
+    if normalized and normalized != "auto":
+        return normalized
+    if base_url_host_matches(client_base_url, "api.githubcopilot.com"):
+        return "copilot"
+    if base_url_host_matches(client_base_url, "chatgpt.com"):
+        return "openai-codex"
+    if base_url_host_matches(client_base_url, "api.anthropic.com"):
+        return "anthropic"
+    if base_url_host_matches(client_base_url, "inference-api.nousresearch.com"):
+        return "nous"
+    return normalized
 
 
 def _try_payment_fallback(
@@ -3666,24 +3706,28 @@ def call_llm(
                     refreshed_client.chat.completions.create(**kwargs), task)
 
         # ── Auth refresh retry ───────────────────────────────────────
+        auth_refresh_provider = _auth_refresh_provider_for_route(
+            resolved_provider, _base_info)
         if (_is_auth_error(first_err)
-                and resolved_provider not in ("auto", "", None)
+                and auth_refresh_provider not in ("auto", "", None)
                 and not client_is_nous):
-            if _refresh_provider_credentials(resolved_provider):
+            if _refresh_provider_credentials(auth_refresh_provider):
+                if auth_refresh_provider != _normalize_aux_provider(resolved_provider):
+                    _evict_cached_clients(resolved_provider)
                 logger.info(
                     "Auxiliary %s: refreshed %s credentials after auth error, retrying",
-                    task or "call", resolved_provider,
+                    task or "call", auth_refresh_provider,
                 )
                 retry_client, retry_model = (
                     resolve_vision_provider_client(
-                        provider=resolved_provider,
+                        provider=auth_refresh_provider,
                         model=final_model,
                         async_mode=False,
                     )[1:]
                     if task == "vision"
                     else _get_cached_client(
-                        resolved_provider,
-                        resolved_model,
+                        auth_refresh_provider,
+                        resolved_model or final_model,
                         base_url=resolved_base_url,
                         api_key=resolved_api_key,
                         api_mode=resolved_api_mode,
@@ -3692,7 +3736,7 @@ def call_llm(
                 )
                 if retry_client is not None:
                     retry_kwargs = _build_call_kwargs(
-                        resolved_provider,
+                        auth_refresh_provider,
                         retry_model or final_model,
                         messages,
                         temperature=temperature,
@@ -3700,10 +3744,10 @@ def call_llm(
                         tools=tools,
                         timeout=effective_timeout,
                         extra_body=effective_extra_body,
-                        base_url=resolved_base_url,
+                        base_url=str(getattr(retry_client, "base_url", "") or resolved_base_url),
                     )
                     _retry_base = str(getattr(retry_client, "base_url", "") or "")
-                    if _is_anthropic_compat_endpoint(resolved_provider, _retry_base):
+                    if _is_anthropic_compat_endpoint(auth_refresh_provider, _retry_base):
                         retry_kwargs["messages"] = _convert_openai_images_to_anthropic(retry_kwargs["messages"])
                     return _validate_llm_response(
                         retry_client.chat.completions.create(**retry_kwargs), task)
@@ -3820,6 +3864,7 @@ async def async_call_llm(
     model: str = None,
     base_url: str = None,
     api_key: str = None,
+    main_runtime: Optional[Dict[str, Any]] = None,
     messages: list,
     temperature: float = None,
     max_tokens: int = None,
@@ -3868,6 +3913,7 @@ async def async_call_llm(
             base_url=resolved_base_url,
             api_key=resolved_api_key,
             api_mode=resolved_api_mode,
+            main_runtime=main_runtime,
         )
         if client is None:
             _explicit = (resolved_provider or "").strip().lower()
@@ -3880,7 +3926,7 @@ async def async_call_llm(
             if not resolved_base_url:
                 logger.info("Auxiliary %s: provider %s unavailable, trying auto-detection chain",
                             task or "call", resolved_provider)
-                client, final_model = _get_cached_client("auto", async_mode=True)
+                client, final_model = _get_cached_client("auto", async_mode=True, main_runtime=main_runtime)
         if client is None:
             raise RuntimeError(
                 f"No LLM provider configured for task={task} provider={resolved_provider}. "
@@ -3960,6 +4006,7 @@ async def async_call_llm(
                 base_url=resolved_base_url,
                 api_key=resolved_api_key,
                 api_mode=resolved_api_mode,
+                main_runtime=main_runtime,
                 is_vision=(task == "vision"),
             )
             if refreshed_client is not None:
@@ -3971,32 +4018,37 @@ async def async_call_llm(
                     await refreshed_client.chat.completions.create(**kwargs), task)
 
         # ── Auth refresh retry (mirrors sync call_llm) ───────────────
+        auth_refresh_provider = _auth_refresh_provider_for_route(
+            resolved_provider, _client_base)
         if (_is_auth_error(first_err)
-                and resolved_provider not in ("auto", "", None)
+                and auth_refresh_provider not in ("auto", "", None)
                 and not client_is_nous):
-            if _refresh_provider_credentials(resolved_provider):
+            if _refresh_provider_credentials(auth_refresh_provider):
+                if auth_refresh_provider != _normalize_aux_provider(resolved_provider):
+                    _evict_cached_clients(resolved_provider)
                 logger.info(
                     "Auxiliary %s (async): refreshed %s credentials after auth error, retrying",
-                    task or "call", resolved_provider,
+                    task or "call", auth_refresh_provider,
                 )
                 if task == "vision":
                     _, retry_client, retry_model = resolve_vision_provider_client(
-                        provider=resolved_provider,
+                        provider=auth_refresh_provider,
                         model=final_model,
                         async_mode=True,
                     )
                 else:
                     retry_client, retry_model = _get_cached_client(
-                        resolved_provider,
-                        resolved_model,
+                        auth_refresh_provider,
+                        resolved_model or final_model,
                         async_mode=True,
                         base_url=resolved_base_url,
                         api_key=resolved_api_key,
                         api_mode=resolved_api_mode,
+                        main_runtime=main_runtime,
                     )
                 if retry_client is not None:
                     retry_kwargs = _build_call_kwargs(
-                        resolved_provider,
+                        auth_refresh_provider,
                         retry_model or final_model,
                         messages,
                         temperature=temperature,
@@ -4004,10 +4056,10 @@ async def async_call_llm(
                         tools=tools,
                         timeout=effective_timeout,
                         extra_body=effective_extra_body,
-                        base_url=resolved_base_url,
+                        base_url=str(getattr(retry_client, "base_url", "") or resolved_base_url),
                     )
                     _retry_base = str(getattr(retry_client, "base_url", "") or "")
-                    if _is_anthropic_compat_endpoint(resolved_provider, _retry_base):
+                    if _is_anthropic_compat_endpoint(auth_refresh_provider, _retry_base):
                         retry_kwargs["messages"] = _convert_openai_images_to_anthropic(retry_kwargs["messages"])
                     return _validate_llm_response(
                         await retry_client.chat.completions.create(**retry_kwargs), task)
