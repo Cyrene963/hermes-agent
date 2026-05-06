@@ -115,6 +115,91 @@ class TestEnvAssignments:
         assert "mypassword" not in result
 
 
+class TestLowercaseDottedConfigKeys:
+    """Regression tests for #16413: lowercase/dotted config key redaction."""
+
+    def test_bare_password_equals(self):
+        result = redact_sensitive_text("password=secret")
+        assert "secret" not in result
+        assert "password=" in result
+
+    def test_dotted_namespace_password(self):
+        result = redact_sensitive_text("spring.datasource.password=secret")
+        assert "secret" not in result
+        assert "spring.datasource.password=" in result
+
+    def test_quoted_password(self):
+        result = redact_sensitive_text("password='secret'")
+        assert "secret" not in result
+
+    def test_double_quoted_password(self):
+        result = redact_sensitive_text('password="secretvalue"')
+        assert "secretvalue" not in result
+
+    def test_dotted_secret(self):
+        result = redact_sensitive_text("db.secret=mysecretvalue1234567890")
+        assert "mysecretvalue" not in result
+
+    def test_dotted_auth(self):
+        result = redact_sensitive_text("spring.security.auth=bearer123token")
+        assert "bearer123token" not in result
+
+    def test_dotted_credential(self):
+        result = redact_sensitive_text("cloud.credential=val12345")
+        assert "val12345" not in result
+
+    def test_dotted_token(self):
+        result = redact_sensitive_text("service.api-token=abc123def456")
+        assert "abc123def456" not in result
+
+    def test_yaml_style_password(self):
+        result = redact_sensitive_text("password: secret")
+        assert "secret" not in result
+        assert "password: " in result
+
+    def test_yaml_style_dotted_password(self):
+        result = redact_sensitive_text("spring.datasource.password: mydbpass")
+        assert "mydbpass" not in result
+
+    def test_code_assignment_with_spaces_unchanged(self):
+        """Spaces around = indicate code, not config — must not redact."""
+        text = "password = get_password()"
+        assert redact_sensitive_text(text) == text
+
+    def test_code_token_await_unchanged(self):
+        text = "token = await getToken()"
+        assert redact_sensitive_text(text) == text
+
+    def test_non_secret_dotted_key_unchanged(self):
+        text = "spring.datasource.url=jdbc:mysql://localhost:3306/db"
+        assert redact_sensitive_text(text) == text
+
+    def test_non_secret_yaml_unchanged(self):
+        text = "model: gpt-4"
+        assert redact_sensitive_text(text) == text
+
+    def test_application_properties_block(self):
+        """Simulate `cat /app/application.properties` output."""
+        text = (
+            "spring.datasource.url=jdbc:mysql://localhost:3306/mydb\n"
+            "spring.datasource.username=admin\n"
+            "spring.datasource.password=SuperSecret123!\n"
+            "server.port=8080"
+        )
+        result = redact_sensitive_text(text)
+        assert "SuperSecret123" not in result
+        assert "spring.datasource.url=jdbc" in result
+        assert "spring.datasource.username=admin" in result
+        assert "server.port=8080" in result
+
+    def test_url_query_param_not_clobbered(self):
+        """Config regex must not eat URL query separators."""
+        text = "https://api.example.com/v1/data?api_key=kABCDEF12345&limit=10"
+        result = redact_sensitive_text(text)
+        assert "kABCDEF12345" not in result
+        assert "limit=10" in result
+
+
 class TestJsonFields:
     def test_json_api_key(self):
         text = '{"apiKey": "sk-proj-abc123def456ghi789jkl012"}'

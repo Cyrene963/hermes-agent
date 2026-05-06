@@ -308,6 +308,15 @@ def sync_skills(quiet: bool = False) -> dict:
 
     _write_manifest(manifest)
 
+    # ── Sync to SkillDB for semantic retrieval ──
+    try:
+        from agent.skill_db import SkillDB
+        db = SkillDB()
+        db.sync_skills(SKILLS_DIR)
+        logger.debug("SkillDB synced after skills_sync")
+    except Exception as e:
+        logger.debug("SkillDB sync failed (non-critical): %s", e)
+
     return {
         "copied": copied,
         "updated": updated,

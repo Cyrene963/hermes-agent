@@ -257,7 +257,7 @@ TOOL_USE_ENFORCEMENT_GUIDANCE = (
 
 # Model name substrings that trigger tool-use enforcement guidance.
 # Add new patterns here when a model family needs explicit steering.
-TOOL_USE_ENFORCEMENT_MODELS = ("gpt", "codex", "gemini", "gemma", "grok")
+TOOL_USE_ENFORCEMENT_MODELS = ("gpt", "codex", "gemini", "gemma", "grok", "mimo")
 
 # OpenAI GPT/Codex-specific execution guidance.  Addresses known failure modes
 # where GPT models abandon work on partial results, skip prerequisite lookups,
@@ -343,6 +343,40 @@ GOOGLE_MODEL_OPERATIONAL_GUIDANCE = (
     "to prevent CLI tools from hanging on prompts.\n"
     "- **Keep going:** Work autonomously until the task is fully resolved. "
     "Don't stop with a plan — execute it.\n"
+)
+
+# MiMo-specific execution guidance.
+# Addresses MiMo's tendency to skip skill loading and fabricate facts.
+MIMO_MODEL_EXECUTION_GUIDANCE = (
+    "# Execution discipline for MiMo\n"
+    "<mandatory_skill_loading>\n"
+    "When skills are listed in the system prompt, you MUST load them via skill_view() "
+    "before proceeding. Do not answer from memory when a relevant skill exists. "
+    "Skills contain verified rules and procedures — ignoring them leads to errors.\n"
+    "</mandatory_skill_loading>\n"
+    "\n"
+    "<verification_before_response>\n"
+    "Before finalizing any response that contains:\n"
+    "- Prices, costs, or financial figures\n"
+    "- Product capabilities or specifications\n"
+    "- Technical configurations or API details\n"
+    "- Model comparisons or benchmark numbers\n"
+    "You MUST verify from official sources using web_search, web_extract, or "
+    "direct API calls. If you cannot verify, explicitly say so.\n"
+    "</verification_before_response>\n"
+    "\n"
+    "<anti_hallucination>\n"
+    "- NEVER fabricate numbers, prices, or specifications\n"
+    "- NEVER assume product capabilities without verification\n"
+    "- When corrected, verify the correction before accepting it\n"
+    "- Label unverified claims clearly as \"unverified\"\n"
+    "</anti_hallucination>\n"
+    "\n"
+    "<tool_persistence>\n"
+    "- Use tools whenever they improve correctness or completeness\n"
+    "- Do not stop early when another tool call would improve the result\n"
+    "- Keep working until the task is complete AND verified\n"
+    "</tool_persistence>"
 )
 
 # Model name substrings that should use the 'developer' role instead of
@@ -713,6 +747,234 @@ def _skill_should_show(
             return False
 
     return True
+
+
+def build_skills_system_prompt_semantic(
+    user_message: str = "",
+    available_tools: "set[str] | None" = None,
+    available_toolsets: "set[str] | None" = None,
+    top_k: int = 15,
+) -> str:
+    """Build a compact skill index using FTS5 semantic retrieval.
+
+    Instead of injecting ALL skills (~4500 tokens), this function:
+    1. Searches the FTS5 index for skills relevant to the user's message
+    2. Gets top-K by usage (proven useful)
+    3. Combines both sets (deduplicated) for ~200 tokens total
+
+    Falls back to broadcast mode if SkillDB is empty or unavailable.
+    """
+    try:
+        from agent.skill_db import SkillDB
+        # ── HYBRID SKILL SELECTION (Layer 1 + 2) ──────────────────────
+        # Try hybrid selection first (fast, no token cost)
+        from agent.hybrid_skill_selector import hybrid_skill_select, should_skip_skills
+        
+        # Check if we should skip skills entirely (greetings, simple questions)
+        if should_skip_skills(user_message):
+            logger.debug("Hybrid selector: skipping skills for simple message")
+            return ""  # No skills needed for greetings
+        
+        # Get hybrid selection result
+        hybrid_result = hybrid_skill_select(user_message)
+        if hybrid_result["method"] == "task_pattern" and hybrid_result["selected_skills"]:
+            # High confidence match - use predefined skills
+            logger.debug("Hybrid selector: using task pattern skills %s (confidence: %.2f)", 
+                        hybrid_result["selected_skills"], hybrid_result["confidence"])
+            
+            # Convert skill names to the format expected by the rest of the function
+            hybrid_skills = []
+            for skill_name in hybrid_result["selected_skills"]:
+                hybrid_skills.append({
+                    "name": skill_name,
+                    "description": f"Task-specific skill (hybrid match: {hybrid_result['method']})",
+                    "score": hybrid_result["confidence"]
+                })
+            
+            # Build index lines from hybrid skills
+            index_lines = []
+            for skill in hybrid_skills:
+                name = skill["name"]
+                desc = skill.get("description", "")
+                if desc:
+                    index_lines.append(f"    - {name}: {desc}")
+                else:
+                    index_lines.append(f"    - {name}")
+            
+            result = (
+                "## Skills (mandatory)\n"
+                "Before replying, scan the skills below. If a skill matches or is even partially relevant "
+                "to your task, you MUST load it with skill_view(name) and follow its instructions. "
+                "Err on the side of loading — it is always better to have context you don't need "
+                "than to miss critical steps, pitfalls, or established workflows. "
+                "Skills contain specialized knowledge — API endpoints, tool-specific commands, "
+                "and proven workflows that outperform general-purpose approaches. Load the skill "
+                "even if you think you could handle the task with basic tools like web_search or terminal. "
+                "Skills also encode the user's preferred approach, conventions, and quality standards "
+                "for tasks like code review, planning, and testing — load them even for tasks you "
+                "already know how to do, because the skill defines how it should be done here.\n"
+                "\n"
+                "<available_skills>\n"
+                + "\n".join(index_lines) + "\n"
+                "</available_skills>\n"
+                "\n"
+                "Only proceed without loading a skill if genuinely none are relevant to the task."
+            )
+            
+            logger.debug(
+                "Hybrid skill selection: %d skills injected via task pattern (confidence: %.2f)",
+                len(hybrid_skills), hybrid_result["confidence"]
+            )
+            return result
+        
+        # Handle AI inference layer
+        if hybrid_result["method"] == "ai_inference" and hybrid_result["selected_skills"]:
+            # AI inference found skills
+            logger.debug("Hybrid selector: using AI inference skills %s (confidence: %.2f)", 
+                        hybrid_result["selected_skills"], hybrid_result["confidence"])
+            
+            # Convert skill names to the format expected by the rest of the function
+            hybrid_skills = []
+            for skill_name in hybrid_result["selected_skills"]:
+                hybrid_skills.append({
+                    "name": skill_name,
+                    "description": f"AI-selected skill for complex task (confidence: {hybrid_result['confidence']:.2f})",
+                    "score": hybrid_result["confidence"]
+                })
+            
+            # Build index lines from hybrid skills
+            index_lines = []
+            for skill in hybrid_skills:
+                name = skill["name"]
+                desc = skill.get("description", "")
+                if desc:
+                    index_lines.append(f"    - {name}: {desc}")
+                else:
+                    index_lines.append(f"    - {name}")
+            
+            result = (
+                "## Skills (mandatory)\n"
+                "Before replying, scan the skills below. If a skill matches or is even partially relevant "
+                "to your task, you MUST load it with skill_view(name) and follow its instructions. "
+                "Err on the side of loading — it is always better to have context you don't need "
+                "than to miss critical steps, pitfalls, or established workflows. "
+                "Skills contain specialized knowledge — API endpoints, tool-specific commands, "
+                "and proven workflows that outperform general-purpose approaches. Load the skill "
+                "even if you think you could handle the task with basic tools like web_search or terminal. "
+                "Skills also encode the user's preferred approach, conventions, and quality standards "
+                "for tasks like code review, planning, and testing — load them even for tasks you "
+                "already know how to do, because the skill defines how it should be done here.\n"
+                "\n"
+                "<available_skills>\n"
+                + "\n".join(index_lines) + "\n"
+                "</available_skills>\n"
+                "\n"
+                "Only proceed without loading a skill if genuinely none are relevant to the task."
+            )
+            
+            logger.debug(
+                "Hybrid skill selection: %d skills injected via AI inference (confidence: %.2f)",
+                len(hybrid_skills), hybrid_result["confidence"]
+            )
+            return result
+        
+        # If hybrid selection didn't produce results or needs FTS5, continue with original FTS5 logic
+        if hybrid_result["method"] == "fts5_fallback":
+            logger.debug("Hybrid selector: falling back to FTS5 search")
+        
+        # ── END HYBRID SELECTION ──────────────────────────────────────
+
+        from gateway.session_context import get_session_env
+        import os
+
+        db = SkillDB()
+
+        # Check if DB has any skills
+        if db.get_skill_count() == 0:
+            # DB empty, fall back to broadcast
+            logger.debug("SkillDB empty, falling back to broadcast")
+            return build_skills_system_prompt(available_tools, available_toolsets)
+
+        # Get disabled skills
+        from agent.skill_utils import get_disabled_skill_names
+        disabled = get_disabled_skill_names()
+
+        # Get top-K by usage (these are proven useful)
+        top_by_usage = db.get_top_by_usage(limit=top_k // 3)
+
+        # Get FTS5 matches for current message
+        semantic_matches = []
+        if user_message.strip():
+            semantic_matches = db.search(
+                user_message,
+                limit=top_k,
+                boost_recent=True,
+            )
+
+        # Combine and deduplicate
+        seen_names = set()
+        combined = []
+
+        # Add semantic matches first (most relevant to current task)
+        for skill in semantic_matches:
+            name = skill["name"]
+            if name not in seen_names and name not in disabled:
+                seen_names.add(name)
+                combined.append(skill)
+
+        # Add top by usage (fill up to top_k)
+        for skill in top_by_usage:
+            name = skill["name"]
+            if name not in seen_names and name not in disabled:
+                seen_names.add(name)
+                combined.append(skill)
+                if len(combined) >= top_k:
+                    break
+
+        if not combined:
+            return build_skills_system_prompt(available_tools, available_toolsets)
+
+        # Build index lines
+        index_lines = []
+        for skill in combined:
+            name = skill["name"]
+            desc = skill.get("description", "")
+            if desc:
+                index_lines.append(f"    - {name}: {desc}")
+            else:
+                index_lines.append(f"    - {name}")
+
+        result = (
+            "## Skills (mandatory)\n"
+            "Before replying, scan the skills below. If a skill matches or is even partially relevant "
+            "to your task, you MUST load it with skill_view(name) and follow its instructions. "
+            "Err on the side of loading — it is always better to have context you don't need "
+            "than to miss critical steps, pitfalls, or established workflows. "
+            "Skills contain specialized knowledge — API endpoints, tool-specific commands, "
+            "and proven workflows that outperform general-purpose approaches. Load the skill "
+            "even if you think you could handle the task with basic tools like web_search or terminal. "
+            "Skills also encode the user's preferred approach, conventions, and quality standards "
+            "for tasks like code review, planning, and testing — load them even for tasks you "
+            "already know how to do, because the skill defines how it should be done here.\n"
+            "\n"
+            "<available_skills>\n"
+            + "\n".join(index_lines) + "\n"
+            "</available_skills>\n"
+            "\n"
+            "Only proceed without loading a skill if genuinely none are relevant to the task."
+        )
+
+        logger.debug(
+            "Semantic skill retrieval: %d skills injected (of %d total) for query: %r",
+            len(combined),
+            db.get_skill_count(),
+            user_message[:50],
+        )
+        return result
+
+    except Exception as e:
+        logger.warning("Semantic skill retrieval failed, falling back to broadcast: %s", e)
+        return build_skills_system_prompt(available_tools, available_toolsets)
 
 
 def build_skills_system_prompt(

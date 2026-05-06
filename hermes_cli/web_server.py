@@ -1369,7 +1369,7 @@ def _anthropic_oauth_status() -> Dict[str, Any]:
             "has_refresh_token": bool(cc_creds.get("refreshToken")),
         }
 
-    env_token = os.getenv("ANTHROPIC_TOKEN") or os.getenv("CLAUDE_CODE_OAUTH_TOKEN")
+    env_token = os.getenv("ANTHROPIC_TOKEN")
     if env_token:
         return {
             "logged_in": True,
@@ -2911,7 +2911,7 @@ def _ws_client_is_allowed(ws: "WebSocket") -> bool:
         return True
     client_host = ws.client.host if ws.client else ""
     if not client_host:
-        return True
+        return False  # fail-closed: reject when client host is unknown
     return client_host in _LOOPBACK_HOSTS
 
 # Per-channel subscriber registry used by /api/pub (PTY-side gateway → dashboard)

@@ -102,10 +102,34 @@ _PREFIX_PATTERNS = [
     r"brv_[A-Za-z0-9]{10,}",            # ByteRover API key
 ]
 
-# ENV assignment patterns: KEY=value where KEY contains a secret-like name
-_SECRET_ENV_NAMES = r"(?:API_?KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH)"
+# ENV assignment patterns: KEY=value where KEY contains a secret-like name.
+# Two tiers:
+#   1. UPPERCASE_ONLY keys (e.g. OPENAI_API_KEY=…) — original strict pattern.
+#   2. Lowercase/dotted config-style keys (e.g. password=…,
+#      spring.datasource.password=…) — only matches when there is NO space
+#      before '=' (prevents matching code like `token = await getToken()`).
+_SECRET_ENV_NAMES_UPPER = r"(?:API_?KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH)"
 _ENV_ASSIGN_RE = re.compile(
-    rf"([A-Z0-9_]{{0,50}}{_SECRET_ENV_NAMES}[A-Z0-9_]{{0,50}})\s*=\s*(['\"]?)(\S+)\2",
+    rf"([A-Z0-9_]{{0,50}}{_SECRET_ENV_NAMES_UPPER}[A-Z0-9_]{{0,50}})\s*=\s*(['\"]?)(\S+)\2",
+)
+
+# Lowercase / dotted config-style keys.  Must use NO-space before '=' to
+# avoid false-positives on code assignments like `secret = await fetch()`.
+# Handles: password=val, spring.datasource.password=val, db.secret='val'
+_SECRET_CONFIG_NAMES = r"(?:api[_-]?key|token|secret|password|passwd|credential|auth)"
+_CONFIG_ASSIGN_RE = re.compile(
+    rf"([a-zA-Z0-9_.\-]{{0,80}}[.\-]{_SECRET_CONFIG_NAMES})=(['\"]?)([^\s'\"&#]+)\2"
+    r"|"  # OR bare keyword (no namespace prefix)
+    rf"(?<![a-zA-Z0-9_.\-])({_SECRET_CONFIG_NAMES})=(['\"]?)([^\s'\"&#]+)\5",
+    re.IGNORECASE,
+)
+
+# YAML-style config keys: `password: value` or `spring.datasource.password: value`
+# Requires colon-space (`: `) — YAML spec mandates space after colon for mappings.
+# Only matches when value is NOT a mapping/anchor/comment (starts with non-special char).
+_YAML_CONFIG_RE = re.compile(
+    rf"([a-zA-Z0-9_.\-]{{0,80}}(?:\.)?{_SECRET_CONFIG_NAMES}):\s+(\S+)\s*$",
+    re.IGNORECASE | re.MULTILINE,
 )
 
 # JSON field patterns: "apiKey": "value", "token": "value", etc.
@@ -336,6 +360,21 @@ def redact_sensitive_text(text: str, *, force: bool = False, code_file: bool = F
             name, quote, value = m.group(1), m.group(2), m.group(3)
             return f"{name}={quote}{_mask_token(value)}{quote}"
         text = _ENV_ASSIGN_RE.sub(_redact_env, text)
+
+        # Lowercase / dotted config assignments: password=*** spring.datasource.password=***
+        def _redact_config(m):
+            if m.group(1) is not None:  # namespaced: spring.datasource.password=***
+                name, quote, value = m.group(1), m.group(2), m.group(3)
+            else:  # bare keyword: password=***
+                name, quote, value = m.group(4), m.group(5), m.group(6)
+            return f"{name}={quote}{_mask_token(value)}{quote}"
+        text = _CONFIG_ASSIGN_RE.sub(_redact_config, text)
+
+        # YAML-style config assignments: password: secret, spring.datasource.password: ***
+        def _redact_yaml_config(m):
+            name, value = m.group(1), m.group(2)
+            return f"{name}: {_mask_token(value)}"
+        text = _YAML_CONFIG_RE.sub(_redact_yaml_config, text)
 
         # JSON fields: "apiKey": "***"  (skip for code files — false positives)
         def _redact_json(m):
