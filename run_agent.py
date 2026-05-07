@@ -1179,6 +1179,9 @@ class AIAgent:
         # Interrupt mechanism for breaking out of tool loops
         self._interrupt_requested = False
         self._interrupt_message = None  # Optional message that triggered interrupt
+
+        # Skill evaluation gate: tracks whether skill_view() has been called
+        self._skill_eval_done = False
         self._execution_thread_id: int | None = None  # Set at run_conversation() start
         self._interrupt_thread_signal_pending = False
         self._client_lock = threading.RLock()
@@ -11260,6 +11263,18 @@ class AIAgent:
                             _injections.append(_fenced)
                     if _plugin_user_context:
                         _injections.append(_plugin_user_context)
+                    # Skill pre-selection: inject mandatory skill check instruction
+                    # until skill_view() has been called at least once.
+                    if not self._skill_eval_done:
+                        try:
+                            from agent.skill_eval_gate import pre_select_skills
+                            _base_content = api_msg.get("content", "")
+                            if isinstance(_base_content, str):
+                                _skill_msg = pre_select_skills(_base_content)
+                                if _skill_msg:
+                                    _injections.append(_skill_msg)
+                        except Exception:
+                            pass
                     if _injections:
                         _base = api_msg.get("content", "")
                         if isinstance(_base, str):
