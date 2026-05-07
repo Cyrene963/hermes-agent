@@ -3178,9 +3178,23 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
                             default_max_turns=goal_max_turns,
                         )
                         if goal_mgr.is_active():
+                            # Extract tool calls and token usage
+                            _tc = 0
+                            _tok = 0
+                            try:
+                                if isinstance(result, dict):
+                                    for _m in (result.get("messages") or []):
+                                        if isinstance(_m, dict) and _m.get("tool_calls"):
+                                            _tc += len(_m["tool_calls"])
+                                    _u = _get_usage(agent) if agent else {}
+                                    _tok = int(_u.get("total", 0) or 0)
+                            except Exception:
+                                pass
                             decision = goal_mgr.evaluate_after_turn(
                                 raw,
                                 user_initiated=True,
+                                tool_calls_count=_tc,
+                                tokens_used=_tok,
                             )
                             verdict_msg = decision.get("message") or ""
                             if verdict_msg:

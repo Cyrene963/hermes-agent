@@ -5625,10 +5625,25 @@ class GatewayRunner:
                     except Exception:
                         session_entry = None
                     if session_entry is not None:
+                        # Extract tool calls and token usage from agent result
+                        _tc_count = 0
+                        _tok_used = 0
+                        try:
+                            if isinstance(_agent_result, dict):
+                                _msgs = _agent_result.get("messages") or []
+                                for _m in _msgs:
+                                    if isinstance(_m, dict) and _m.get("tool_calls"):
+                                        _tc_count += len(_m["tool_calls"])
+                                _usage = _agent_result.get("usage") or {}
+                                _tok_used = int(_usage.get("total_tokens", 0) or 0)
+                        except Exception:
+                            pass
                         self._post_turn_goal_continuation(
                             session_entry=session_entry,
                             source=source,
                             final_response=_final_text,
+                            tool_calls_count=_tc_count,
+                            tokens_used=_tok_used,
                         )
             except Exception as _goal_exc:
                 logger.debug("goal continuation hook failed: %s", _goal_exc)
@@ -8190,6 +8205,8 @@ class GatewayRunner:
         session_entry: Any,
         source: Any,
         final_response: str,
+        tool_calls_count: int = 0,
+        tokens_used: int = 0,
     ) -> None:
         """Run the goal judge after a gateway turn and, if still active,
         enqueue a continuation prompt for the same session.
@@ -8225,7 +8242,12 @@ class GatewayRunner:
         if not mgr.is_active():
             return
 
-        decision = mgr.evaluate_after_turn(final_response or "", user_initiated=True)
+        decision = mgr.evaluate_after_turn(
+            final_response or "",
+            user_initiated=True,
+            tool_calls_count=tool_calls_count,
+            tokens_used=tokens_used,
+        )
         msg = decision.get("message") or ""
 
         # Send the status line back to the user so they see the judge's

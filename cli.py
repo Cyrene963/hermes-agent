@@ -7505,6 +7505,7 @@ class HermesCLI:
 
         # Extract the agent's final response for this turn.
         last_response = ""
+        tool_calls_count = 0
         try:
             hist = self.conversation_history or []
             for msg in reversed(hist):
@@ -7521,10 +7522,28 @@ class HermesCLI:
                     else:
                         last_response = str(content or "")
                     break
+            # Count tool calls in this turn
+            for msg in hist:
+                if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                    tool_calls_count += len(msg["tool_calls"])
         except Exception:
             last_response = ""
 
-        decision = mgr.evaluate_after_turn(last_response, user_initiated=True)
+        # Get token usage from agent
+        tokens_used = 0
+        try:
+            agent = getattr(self, "agent", None)
+            if agent:
+                tokens_used = getattr(agent, "session_total_tokens", 0) or 0
+        except Exception:
+            pass
+
+        decision = mgr.evaluate_after_turn(
+            last_response,
+            user_initiated=True,
+            tool_calls_count=tool_calls_count,
+            tokens_used=tokens_used,
+        )
         msg = decision.get("message") or ""
         if msg:
             _cprint(f"  {msg}")
