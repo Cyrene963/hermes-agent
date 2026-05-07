@@ -11,17 +11,7 @@ def _hermes_home_path() -> Path:
     """Resolve the active HERMES_HOME (profile-aware) without circular imports."""
     try:
         from hermes_constants import get_hermes_home  # local import to avoid cycles
-
         return get_hermes_home()
-    except Exception:
-        return Path(os.path.expanduser("~/.hermes"))
-
-
-def _hermes_root_path() -> Path:
-    """Resolve the Hermes root dir (always the parent of any profile, never per-profile)."""
-    try:
-        from hermes_constants import get_default_hermes_root  # local import to avoid cycles
-        return get_default_hermes_root()
     except Exception:
         return Path(os.path.expanduser("~/.hermes"))
 
@@ -29,7 +19,6 @@ def _hermes_root_path() -> Path:
 def build_write_denied_paths(home: str) -> set[str]:
     """Return exact sensitive paths that must never be written."""
     hermes_home = _hermes_home_path()
-    hermes_root = _hermes_root_path()
     return {
         os.path.realpath(p)
         for p in [
@@ -37,11 +26,7 @@ def build_write_denied_paths(home: str) -> set[str]:
             os.path.join(home, ".ssh", "id_rsa"),
             os.path.join(home, ".ssh", "id_ed25519"),
             os.path.join(home, ".ssh", "config"),
-            # Active profile .env (or top-level .env when not in profile mode).
             str(hermes_home / ".env"),
-            # Top-level .env, even when running under a profile — overwriting it
-            # leaks credentials across every profile that inherits from root (#15981).
-            str(hermes_root / ".env"),
             os.path.join(home, ".bashrc"),
             os.path.join(home, ".zshrc"),
             os.path.join(home, ".profile"),
@@ -98,55 +83,33 @@ def is_write_denied(path: str) -> bool:
         if resolved.startswith(prefix):
             return True
 
-    # New: Check for Hermes control files and mcp-tokens directory
-    hermes_home = _hermes_home_path()
-    hermes_home_real = os.path.realpath(hermes_home)
-
-    # Check for exact control files
-    hermes_control_files = [
-        os.path.join(hermes_home_real, "auth.json"),
-        os.path.join(hermes_home_real, "config.yaml"),
-        os.path.join(hermes_home_real, "webhook_subscriptions.json"),
-    ]
-    for control_file in hermes_control_files:
-        if resolved == os.path.realpath(control_file):
-            return True
-
-    # Check for anything inside mcp-tokens directory
-    mcp_tokens_dir = os.path.join(hermes_home_real, "mcp-tokens")
-    try:
-        mcp_tokens_dir_real = os.path.realpath(mcp_tokens_dir)
-        if resolved.startswith(mcp_tokens_dir_real + os.sep):
-            return True
-    except Exception:
-        pass
-
     safe_root = get_safe_write_root()
-    if safe_root and not (
-        resolved == safe_root or resolved.startswith(safe_root + os.sep)
-    ):
+    if safe_root and not (resolved == safe_root or resolved.startswith(safe_root + os.sep)):
         return True
 
     return False
 
 
+# Common secret-bearing project-local environment file basenames.
+# These are blocked because .env files routinely contain API keys,
+# database passwords, and other credentials.
+_BLOCKED_PROJECT_ENV_BASENAMES: set[str] = {
+    ".env",
+    ".env.local",
+    ".env.development",
+    ".env.production",
+    ".env.test",
+    ".env.staging",
+    ".envrc",
+}
+
+
 def get_read_block_error(path: str) -> Optional[str]:
-    """Return an error message when a read targets a denied Hermes path.
+    """Return an error message when a read targets blocked files.
 
-    Two categories are blocked:
-      * Internal Hermes cache files under ``HERMES_HOME/skills/.hub`` —
-        readable metadata that an attacker could use as a prompt-injection
-        carrier.
-      * Credential stores at the top of ``HERMES_HOME`` (``auth.json``,
-        ``auth.lock``, ``.anthropic_oauth.json``) — plaintext provider
-        keys / OAuth tokens that the agent never needs to read directly.
-
-    Callers that resolve relative paths against a non-process cwd
-    (e.g. ``TERMINAL_CWD`` in ``tools/file_tools.py``) MUST pre-resolve
-    and pass the absolute path string.  This function's own ``resolve()``
-    is anchored at the Python process cwd, so a relative input like
-    ``"auth.json"`` would otherwise miss the denylist when the task's
-    terminal cwd differs from the process cwd.
+    Blocks:
+    - Internal Hermes cache files (hub/index-cache)
+    - Common secret-bearing project-local .env files
     """
     resolved = Path(path).expanduser().resolve()
     hermes_home = _hermes_home_path().resolve()
@@ -164,18 +127,11 @@ def get_read_block_error(path: str) -> Optional[str]:
             "and cannot be read directly to prevent prompt injection. "
             "Use the skills_list or skill_view tools instead."
         )
-    # Block credential stores at the top level of HERMES_HOME.
-    # Only the direct children (not files in subdirectories) are denied.
-    _CREDENTIAL_FILES = {"auth.json", "auth.lock", ".anthropic_oauth.json"}
-    try:
-        resolved.relative_to(hermes_home)
-    except ValueError:
-        pass
-    else:
-        # It's inside HERMES_HOME — check it's a direct child, not nested.
-        if resolved.parent.resolve() == hermes_home and resolved.name in _CREDENTIAL_FILES:
-            return (
-                f"Access denied: {path} is a Hermes credential store "
-                "and cannot be read to prevent credential exfiltration."
-            )
+    # Block common secret-bearing project-local .env files.
+    if resolved.name in _BLOCKED_PROJECT_ENV_BASENAMES:
+        return (
+            f"Access denied: {path} is a secret-bearing environment file "
+            "and cannot be read to prevent credential leakage. "
+            "If you need to check the file structure, read .env.example instead."
+        )
     return None
