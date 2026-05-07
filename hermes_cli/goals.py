@@ -47,14 +47,20 @@ DEFAULT_MAX_TURNS = 20
 DEFAULT_JUDGE_TIMEOUT = 30.0
 # Cap how much of the last response + recent messages we send to the judge.
 _JUDGE_RESPONSE_SNIPPET_CHARS = 4000
+# Anti-laziness: suppress continuation after N consecutive turns with 0 tool calls.
+MAX_IDLE_TURNS = 3
+# Wrap-up steering: inject budget warning when this fraction is consumed.
+WRAP_UP_FRACTION = 0.9
 
 
 CONTINUATION_PROMPT_TEMPLATE = (
     "[Continuing toward your standing goal]\n"
     "Goal: {goal}\n\n"
+    "{budget_info}"
     "Continue working toward this goal. Take the next concrete step. "
     "If you believe the goal is complete, state so explicitly and stop. "
     "If you are blocked and need input from the user, say so clearly and stop."
+    "{wrap_up}"
 )
 
 
@@ -91,7 +97,7 @@ class GoalState:
     """Serializable goal state stored per session."""
 
     goal: str
-    status: str = "active"          # active | paused | done | cleared
+    status: str = "active"          # active | paused | done | cleared | budget_limited
     turns_used: int = 0
     max_turns: int = DEFAULT_MAX_TURNS
     created_at: float = 0.0
@@ -99,6 +105,13 @@ class GoalState:
     last_verdict: Optional[str] = None        # "done" | "continue" | "skipped"
     last_reason: Optional[str] = None
     paused_reason: Optional[str] = None       # why we auto-paused (budget, etc.)
+    # Codex /goal enhancements
+    token_budget: Optional[int] = None        # token limit (None = unlimited)
+    tokens_used: int = 0                      # approximate tokens consumed
+    time_used_seconds: float = 0.0            # wall-clock time
+    tool_calls_in_turn: int = 0               # tool calls in the last turn
+    consecutive_idle_turns: int = 0           # turns with 0 tool calls in a row
+    goal_suppressed: bool = False             # anti-laziness: stop continuation
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False)
@@ -116,6 +129,12 @@ class GoalState:
             last_verdict=data.get("last_verdict"),
             last_reason=data.get("last_reason"),
             paused_reason=data.get("paused_reason"),
+            token_budget=data.get("token_budget"),
+            tokens_used=int(data.get("tokens_used", 0) or 0),
+            time_used_seconds=float(data.get("time_used_seconds", 0.0) or 0.0),
+            tool_calls_in_turn=int(data.get("tool_calls_in_turn", 0) or 0),
+            consecutive_idle_turns=int(data.get("consecutive_idle_turns", 0) or 0),
+            goal_suppressed=bool(data.get("goal_suppressed", False)),
         )
 
 
@@ -376,18 +395,27 @@ class GoalManager:
         if s is None or s.status in ("cleared",):
             return "No active goal. Set one with /goal <text>."
         turns = f"{s.turns_used}/{s.max_turns} turns"
+        tokens = ""
+        if s.token_budget:
+            tokens = f", {s.tokens_used}/{s.token_budget} tokens"
+        elif s.tokens_used > 0:
+            tokens = f", {s.tokens_used} tokens"
+        time_info = f", {s.time_used_seconds:.0f}s" if s.time_used_seconds > 0 else ""
         if s.status == "active":
-            return f"⊙ Goal (active, {turns}): {s.goal}"
+            idle_warn = f" ⚠ idle×{s.consecutive_idle_turns}" if s.consecutive_idle_turns > 0 else ""
+            return f"⊙ Goal (active, {turns}{tokens}{time_info}{idle_warn}): {s.goal}"
         if s.status == "paused":
             extra = f" — {s.paused_reason}" if s.paused_reason else ""
-            return f"⏸ Goal (paused, {turns}{extra}): {s.goal}"
+            return f"⏸ Goal (paused, {turns}{tokens}{time_info}{extra}): {s.goal}"
         if s.status == "done":
-            return f"✓ Goal done ({turns}): {s.goal}"
-        return f"Goal ({s.status}, {turns}): {s.goal}"
+            return f"✓ Goal done ({turns}{tokens}{time_info}): {s.goal}"
+        if s.status == "budget_limited":
+            return f"⏸ Goal budget-limited ({turns}{tokens}{time_info}): {s.goal}"
+        return f"Goal ({s.status}, {turns}{tokens}{time_info}): {s.goal}"
 
     # --- mutation -----------------------------------------------------
 
-    def set(self, goal: str, *, max_turns: Optional[int] = None) -> GoalState:
+    def set(self, goal: str, *, max_turns: Optional[int] = None, token_budget: Optional[int] = None) -> GoalState:
         goal = (goal or "").strip()
         if not goal:
             raise ValueError("goal text is empty")
@@ -397,6 +425,7 @@ class GoalManager:
             turns_used=0,
             max_turns=int(max_turns) if max_turns else self.default_max_turns,
             created_at=time.time(),
+            token_budget=token_budget,
             last_turn_at=0.0,
         )
         self._state = state
@@ -443,12 +472,20 @@ class GoalManager:
         last_response: str,
         *,
         user_initiated: bool = True,
+        tool_calls_count: int = 0,
+        tokens_used: int = 0,
     ) -> Dict[str, Any]:
         """Run the judge and update state. Return a decision dict.
 
         ``user_initiated`` distinguishes a real user prompt (True) from a
         continuation prompt we fed ourselves (False). Both increment
         ``turns_used`` because both consume model budget.
+
+        ``tool_calls_count`` is the number of tool calls the model made in
+        this turn. Used for anti-laziness detection.
+
+        ``tokens_used`` is the approximate token count for this turn. Used
+        for token budget tracking.
 
         Decision keys:
           - ``status``: current goal status after update
@@ -472,6 +509,56 @@ class GoalManager:
         # Count the turn that just finished.
         state.turns_used += 1
         state.last_turn_at = time.time()
+
+        # ── Token budget tracking (Codex /goal) ──────────────────────
+        if tokens_used > 0:
+            state.tokens_used += tokens_used
+        if state.created_at > 0:
+            state.time_used_seconds = time.time() - state.created_at
+        state.tool_calls_in_turn = tool_calls_count
+
+        # ── Anti-laziness detection (Codex /goal) ────────────────────
+        # If this is a continuation turn (not user-initiated) and the model
+        # made zero tool calls, it's "idle" — suppress further continuation.
+        if not user_initiated and tool_calls_count == 0:
+            state.consecutive_idle_turns += 1
+            if state.consecutive_idle_turns >= MAX_IDLE_TURNS:
+                state.goal_suppressed = True
+                save_goal(self.session_id, state)
+                return {
+                    "status": "paused",
+                    "should_continue": False,
+                    "continuation_prompt": None,
+                    "verdict": "continue",
+                    "reason": "anti-laziness: no tool calls for consecutive turns",
+                    "message": (
+                        f"⏸ Goal paused — no progress for {state.consecutive_idle_turns} turns. "
+                        "The agent made no tool calls in continuation turns. "
+                        "Use /goal resume to retry, or /goal clear to stop."
+                    ),
+                }
+        else:
+            # Reset idle counter on productive turn
+            state.consecutive_idle_turns = 0
+            state.goal_suppressed = False
+
+        # ── Token budget check (Codex /goal) ─────────────────────────
+        if state.token_budget and state.tokens_used >= state.token_budget:
+            state.status = "budget_limited"
+            save_goal(self.session_id, state)
+            return {
+                "status": "budget_limited",
+                "should_continue": False,
+                "continuation_prompt": None,
+                "verdict": "continue",
+                "reason": f"token budget exhausted ({state.tokens_used}/{state.token_budget})",
+                "message": (
+                    f"⏸ Goal paused — token budget exhausted "
+                    f"({state.tokens_used}/{state.token_budget} tokens, "
+                    f"{state.time_used_seconds:.0f}s elapsed). "
+                    "Use /goal resume to continue with a new budget, or /goal clear to stop."
+                ),
+            }
 
         verdict, reason = judge_goal(state.goal, last_response)
         state.last_verdict = verdict
@@ -520,7 +607,30 @@ class GoalManager:
     def next_continuation_prompt(self) -> Optional[str]:
         if not self._state or self._state.status != "active":
             return None
-        return CONTINUATION_PROMPT_TEMPLATE.format(goal=self._state.goal)
+        s = self._state
+        # Build budget info string
+        budget_info = ""
+        if s.token_budget:
+            remaining = max(0, s.token_budget - s.tokens_used)
+            budget_info = (
+                f"Budget: {s.tokens_used}/{s.token_budget} tokens used, "
+                f"{remaining} remaining, {s.time_used_seconds:.0f}s elapsed\n\n"
+            )
+        else:
+            budget_info = (
+                f"Tokens used: {s.tokens_used}, "
+                f"Time: {s.time_used_seconds:.0f}s elapsed\n\n"
+            )
+        # Wrap-up steering when near budget limit
+        wrap_up = ""
+        if s.token_budget and s.tokens_used >= s.token_budget * WRAP_UP_FRACTION:
+            wrap_up = (
+                "\n\nWRAP-UP: You are near the token budget limit. "
+                "Finish current work, summarize progress, and stop."
+            )
+        return CONTINUATION_PROMPT_TEMPLATE.format(
+            goal=s.goal, budget_info=budget_info, wrap_up=wrap_up,
+        )
 
 
 __all__ = [
@@ -528,6 +638,8 @@ __all__ = [
     "GoalManager",
     "CONTINUATION_PROMPT_TEMPLATE",
     "DEFAULT_MAX_TURNS",
+    "MAX_IDLE_TURNS",
+    "WRAP_UP_FRACTION",
     "load_goal",
     "save_goal",
     "clear_goal",
