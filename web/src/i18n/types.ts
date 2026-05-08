@@ -143,6 +143,8 @@ export interface Translations {
     resumeInChat: string;
     previousPage: string;
     nextPage: string;
+    allPlatforms: string;
+    filterByPlatform: string;
     roles: {
       user: string;
       assistant: string;

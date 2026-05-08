@@ -16,6 +16,7 @@ from tools.file_operations import (
     normalize_search_pagination,
 )
 from tools import file_state
+from tools.file_state_cache import file_state_cache
 from agent.redact import redact_sensitive_text
 
 logger = logging.getLogger(__name__)
@@ -565,6 +566,22 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = 
                             "already_read": hits + 1,
                         }, ensure_ascii=False)
 
+                    # ── FileStateCache: return cached content ─────────
+                    # If we have the content cached (from a prior read),
+                    # return it directly instead of an empty stub.  This
+                    # helps after context compression when the model lost
+                    # the original read_file result.
+                    cached_state = file_state_cache.get(resolved_str)
+                    if cached_state is not None and cached_state.mtime == current_mtime:
+                        return json.dumps({
+                            "status": "cached",
+                            "path": path,
+                            "content": cached_state.content,
+                            "dedup": True,
+                            "content_returned": True,
+                            "_cache_stats": file_state_cache.stats(),
+                        }, ensure_ascii=False)
+
                     return json.dumps({
                         "status": "unchanged",
                         "message": _READ_DEDUP_STATUS_MESSAGE,
@@ -655,6 +672,17 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = 
             # Bound the per-task containers so a long CLI session doesn't
             # accumulate megabytes of dict/set state.  See _cap_read_tracker_data.
             _cap_read_tracker_data(task_data)
+
+        # ── FileStateCache: cache actual content ─────────────────────
+        # Store the read content so it can be returned on subsequent
+        # dedup hits (e.g. after context compression when the model
+        # lost the original read_file result).
+        if result.content:
+            try:
+                _mtime_for_cache = os.path.getmtime(resolved_str)
+                file_state_cache.set(resolved_str, result.content, _mtime_for_cache)
+            except OSError:
+                pass  # Can't stat — skip caching
 
         # Cross-agent file-state registry (separate from per-task read
         # tracker above): records that THIS agent has read this path so
@@ -783,6 +811,12 @@ def _update_read_timestamp(filepath: str, task_id: str) -> None:
     """
     # Invalidate dedup first (before acquiring lock for timestamp update).
     _invalidate_dedup_for_path(filepath, task_id)
+    # Invalidate FileStateCache so next read gets fresh content.
+    try:
+        _resolved_for_cache = str(_resolve_path_for_task(filepath, task_id))
+        file_state_cache.invalidate_path(_resolved_for_cache)
+    except (OSError, ValueError):
+        pass
     try:
         resolved = str(_resolve_path_for_task(filepath, task_id))
         current_mtime = os.path.getmtime(resolved)

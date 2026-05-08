@@ -112,8 +112,8 @@ class TestJudgeGoal:
         verdict, _ = judge_goal("ship the thing", "")
         assert verdict == "continue"
 
-    def test_no_aux_client_continues(self):
-        """Fail-open: if no aux client, we must return continue, not skipped/done."""
+    def test_no_aux_client_returns_judge_unavailable(self):
+        """No aux client → judge_unavailable (fail-closed)."""
         from hermes_cli import goals
 
         with patch(
@@ -121,10 +121,10 @@ class TestJudgeGoal:
             return_value=(None, None),
         ):
             verdict, _ = goals.judge_goal("my goal", "my response")
-        assert verdict == "continue"
+        assert verdict == "judge_unavailable"
 
-    def test_api_error_continues(self):
-        """Judge exception → fail-open continue (don't wedge progress on judge bugs)."""
+    def test_api_error_returns_judge_unavailable(self):
+        """Judge exception after retries → fail-closed (judge_unavailable)."""
         from hermes_cli import goals
 
         fake_client = MagicMock()
@@ -134,8 +134,51 @@ class TestJudgeGoal:
             return_value=(fake_client, "judge-model"),
         ):
             verdict, reason = goals.judge_goal("goal", "response")
-        assert verdict == "continue"
+        # RuntimeError is non-transient → no retries, immediate judge_unavailable
+        assert verdict == "judge_unavailable"
         assert "judge error" in reason.lower()
+
+    def test_transient_error_retries_then_fails(self):
+        """Transient errors (connection, timeout) are retried before giving up."""
+        from hermes_cli import goals
+        from openai import APIConnectionError
+
+        fake_client = MagicMock()
+        # All 3 attempts (1 initial + 2 retries) fail with connection error
+        fake_client.chat.completions.create.side_effect = APIConnectionError(
+            request=MagicMock()
+        )
+        with patch(
+            "agent.auxiliary_client.get_text_auxiliary_client",
+            return_value=(fake_client, "judge-model"),
+        ):
+            verdict, reason = goals.judge_goal("goal", "response")
+        assert verdict == "judge_unavailable"
+        assert "3 attempts" in reason
+        # Should have tried 3 times (initial + 2 retries)
+        assert fake_client.chat.completions.create.call_count == 3
+
+    def test_transient_error_succeeds_on_retry(self):
+        """If a transient error recovers on retry, we get a normal verdict."""
+        from hermes_cli import goals
+        from openai import APITimeoutError
+
+        fake_client = MagicMock()
+        # First attempt fails, second succeeds
+        fake_client.chat.completions.create.side_effect = [
+            APITimeoutError(request=MagicMock()),
+            MagicMock(choices=[MagicMock(message=MagicMock(
+                content='{"done": true, "reason": "recovered"}'
+            ))]),
+        ]
+        with patch(
+            "agent.auxiliary_client.get_text_auxiliary_client",
+            return_value=(fake_client, "judge-model"),
+        ):
+            verdict, reason = goals.judge_goal("goal", "response")
+        assert verdict == "done"
+        assert reason == "recovered"
+        assert fake_client.chat.completions.create.call_count == 2
 
     def test_judge_says_done(self):
         from hermes_cli import goals
@@ -334,6 +377,112 @@ class TestGoalManager:
         assert prompt is not None
         assert "port goal command to hermes" in prompt
         assert prompt.strip()  # non-empty
+
+    def test_evaluate_after_turn_judge_unavailable_pauses(self, hermes_home):
+        """When the judge API is unavailable (after retries), the goal pauses
+        instead of continuing silently.  This is fail-closed behavior.
+
+        Previously this was fail-open (always continue), which caused goals
+        to run forever when the judge API was down.
+        """
+        from hermes_cli.goals import GoalManager
+
+        mgr = GoalManager(session_id="eval-judge-unavail")
+        mgr.set("build the widget")
+
+        # Judge returns "judge_unavailable" after exhausting retries.
+        resp = "I've finished building the widget. Goal is complete."
+        with _patch_judge("judge_unavailable", "judge error after 3 attempts: APITimeoutError: timeout"):
+            d = mgr.evaluate_after_turn(resp)
+        # Goal is paused, not done — user must manually resume when judge is back
+        assert d["verdict"] == "judge_unavailable"
+        assert d["should_continue"] is False
+        assert mgr.state.status == "paused"
+        assert "judge error" in d["reason"]
+        assert "/goal resume" in d["message"]
+
+    def test_evaluate_after_turn_judge_unavailable_even_with_completion_text(self, hermes_home):
+        """Even if the agent's response says 'goal complete', we don't trust
+        it when the judge is unavailable.  Only the judge can confirm done.
+
+        This prevents the agent from self-declaring victory without verification.
+        """
+        from hermes_cli.goals import GoalManager
+
+        mgr = GoalManager(session_id="eval-judge-unavail-text")
+        mgr.set("修复这个bug")
+
+        resp = "所有代码已提交。目标已完成。"
+        with _patch_judge("judge_unavailable", "judge error after 3 attempts: ConnectionError"):
+            d = mgr.evaluate_after_turn(resp)
+        # Paused — not done.  The agent saying "done" isn't enough.
+        assert d["verdict"] == "judge_unavailable"
+        assert d["should_continue"] is False
+        assert mgr.state.status == "paused"
+
+    def test_evaluate_after_turn_normal_continue(self, hermes_home):
+        """Normal flow: judge says continue → goal stays active."""
+        from hermes_cli.goals import GoalManager
+
+        mgr = GoalManager(session_id="eval-cont")
+        mgr.set("refactor the login handler")
+
+        # Response is progress but NOT completion
+        resp = "I've started refactoring the login handler. More work needed."
+        # Judge returns continue with a real evaluation (not an error)
+        with _patch_judge("continue", "still in progress"):
+            d = mgr.evaluate_after_turn(resp)
+        assert d["verdict"] == "continue"
+        assert d["should_continue"] is True
+        assert mgr.state.status == "active"
+
+    def test_evaluate_after_turn_judge_done(self, hermes_home):
+        """When the judge says done, the goal completes."""
+        from hermes_cli.goals import GoalManager
+
+        mgr = GoalManager(session_id="eval-judge-done")
+        mgr.set("build the widget")
+
+        resp = "I've finished building the widget. All tests pass."
+        with _patch_judge("done", "goal requirements met"):
+            d = mgr.evaluate_after_turn(resp)
+        assert d["verdict"] == "done"
+        assert d["should_continue"] is False
+        assert mgr.state.status == "done"
+
+    def test_evaluate_after_turn_judge_says_continue_overrides_text(self, hermes_home):
+        """When the judge works and says continue, we trust it — even if the
+        agent's response contains completion language.
+
+        This is the core principle: the judge is authoritative, not the agent.
+        """
+        from hermes_cli.goals import GoalManager
+
+        mgr = GoalManager(session_id="eval-judge-override")
+        mgr.set("build the widget")
+
+        # Agent says "goal complete" but judge says "still needs testing"
+        resp = "I've finished building the widget. Goal is complete."
+        with _patch_judge("continue", "still needs testing"):
+            d = mgr.evaluate_after_turn(resp)
+        # Judge's verdict wins
+        assert d["verdict"] == "continue"
+        assert d["should_continue"] is True
+        assert mgr.state.status == "active"
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Helpers
+# ──────────────────────────────────────────────────────────────────────
+
+
+def _patch_judge(verdict: str, reason: str):
+    """Context manager that patches judge_goal to return a fixed verdict."""
+    from unittest.mock import patch
+    return patch(
+        "hermes_cli.goals.judge_goal",
+        return_value=(verdict, reason),
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────

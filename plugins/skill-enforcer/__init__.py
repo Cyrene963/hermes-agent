@@ -26,7 +26,10 @@ from typing import Any, Dict, Optional
 logger = logging.getLogger(__name__)
 
 # How many action tool calls before forcing a compliance checkpoint
-_CHECKPOINT_INTERVAL = 8
+# Increased from 8 to 25 — 8 was too aggressive, causing frequent interruptions
+# and wasted tokens on hindsight_recall. 25 strikes a better balance between
+# compliance checking and task flow.
+_CHECKPOINT_INTERVAL = 25
 
 # Tools that are "actions" — they do things, not just read/search
 _ACTION_TOOLS = frozenset({

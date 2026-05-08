@@ -55,8 +55,13 @@ async function getSessionToken(): Promise<string> {
 
 export const api = {
   getStatus: () => fetchJSON<StatusResponse>("/api/status"),
-  getSessions: (limit = 20, offset = 0) =>
-    fetchJSON<PaginatedSessions>(`/api/sessions?limit=${limit}&offset=${offset}`),
+  getSessions: (limit = 20, offset = 0, source?: string) => {
+    const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+    if (source) params.set("source", source);
+    return fetchJSON<PaginatedSessions>(`/api/sessions?${params.toString()}`);
+  },
+  getSessionSources: () =>
+    fetchJSON<SessionSourcesResponse>("/api/sessions/sources"),
   getSessionMessages: (id: string) =>
     fetchJSON<SessionMessagesResponse>(`/api/sessions/${encodeURIComponent(id)}/messages`),
   deleteSession: (id: string) =>
@@ -390,6 +395,15 @@ export interface PaginatedSessions {
   total: number;
   limit: number;
   offset: number;
+}
+
+export interface SessionSourceInfo {
+  source: string;
+  count: number;
+}
+
+export interface SessionSourcesResponse {
+  sources: SessionSourceInfo[];
 }
 
 export interface EnvVarInfo {

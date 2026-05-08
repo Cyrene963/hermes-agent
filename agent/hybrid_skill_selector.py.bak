@@ -101,24 +101,53 @@ def ai_inference_select(user_message: str, context: str = "", max_skills: int = 
         return []
 
 def hybrid_skill_select(user_message: str, context: str = "") -> Dict[str, Any]:
-    """Select candidate skills using FTS5 semantic recall only."""
-    if should_skip_skills(user_message):
-        return {"skills": [], "method": "skip", "injected": False}
-    candidates = []
-    if user_message and user_message.strip():
-        try:
-            candidates = skill_db.fts5_search(user_message.strip(), limit=5)
-        except Exception:
-            pass
-    if not candidates:
-        return {"skills": [], "method": "none", "injected": False}
-    skill_index = []
-    for skill in candidates:
-        skill_index.append({
-            "name": skill.get("name", "unknown"),
-            "description": skill.get("description", ""),
-        })
-    return {"skills": skill_index, "method": "fts5_recall", "injected": True}
+    """
+    Hybrid skill selection with three layers.
+    
+    Returns:
+        {
+            "selected_skills": List[str],
+            "method": "fast_rule" | "task_pattern" | "ai_inference" | "fts5_fallback",
+            "confidence": float  # 0.0 to 1.0
+        }
+    """
+    result = {
+        "selected_skills": [],
+        "method": "fast_rule",
+        "confidence": 1.0
+    }
+    
+    # Layer 1: Fast rules (greetings, simple questions)
+    if is_greeting(user_message):
+        result["method"] = "fast_rule"
+        result["confidence"] = 0.95
+        return result
+    
+    # Layer 2: High confidence task patterns
+    task_skills = get_task_skills(user_message)
+    if task_skills:
+        result["selected_skills"] = task_skills
+        result["method"] = "task_pattern"
+        result["confidence"] = 0.85
+        return result
+    
+    # Layer 3: Complex task detection -> AI inference
+    if is_complex_task(user_message):
+        selected_skills = ai_inference_select(user_message, context)
+        if selected_skills:
+            result["selected_skills"] = selected_skills
+            result["method"] = "ai_inference"
+            result["confidence"] = 0.75
+        else:
+            # AI inference didn't find skills, fall back to FTS5
+            result["method"] = "fts5_fallback"
+            result["confidence"] = 0.6
+        return result
+    
+    # Default: needs FTS5 search
+    result["method"] = "fts5_fallback"
+    result["confidence"] = 0.7
+    return result
 
 def should_skip_skills(user_message: str) -> bool:
     """Quick check if skills should be skipped entirely."""

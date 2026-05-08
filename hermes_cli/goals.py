@@ -52,6 +52,28 @@ MAX_IDLE_TURNS = 3
 # Wrap-up steering: inject budget warning when this fraction is consumed.
 WRAP_UP_FRACTION = 0.9
 
+# Judge retry: how many times to retry on transient failures before giving up.
+_JUDGE_MAX_RETRIES = 2
+
+
+def _is_transient_judge_error(exc: Exception) -> bool:
+    """Return True if the exception is likely transient and worth retrying."""
+    from openai import (
+        APIConnectionError,
+        APITimeoutError,
+        RateLimitError,
+    )
+
+    if isinstance(exc, (APIConnectionError, APITimeoutError, RateLimitError)):
+        return True
+    # Some providers wrap transient errors in generic APIStatusError
+    # with 429 or 5xx status codes.
+    if hasattr(exc, "status_code"):
+        code = getattr(exc, "status_code", 0)
+        if code == 429 or code >= 500:
+            return True
+    return False
+
 
 CONTINUATION_PROMPT_TEMPLATE = (
     "[Continuing toward your standing goal]\n"
@@ -293,11 +315,13 @@ def judge_goal(
     """Ask the auxiliary model whether the goal is satisfied.
 
     Returns ``(verdict, reason)`` where verdict is ``"done"``, ``"continue"``,
-    or ``"skipped"`` (when the judge couldn't be reached).
+    or ``"judge_unavailable"`` (when the judge couldn't be reached after retries).
 
-    This is deliberately fail-open: any error returns ``("continue", "...")``
-    so a broken judge doesn't wedge progress — the turn budget is the
-    backstop.
+    Transient failures (connection errors, timeouts, rate limits) are retried
+    up to `_JUDGE_MAX_RETRIES` times.  If all retries are exhausted, or a
+    non-recoverable error occurs (import failure, misconfigured client), the
+    verdict is ``"judge_unavailable"`` so the caller can pause the goal
+    instead of silently continuing.
     """
     if not goal.strip():
         return "skipped", "empty goal"
@@ -309,36 +333,51 @@ def judge_goal(
         from agent.auxiliary_client import get_text_auxiliary_client
     except Exception as exc:
         logger.debug("goal judge: auxiliary client import failed: %s", exc)
-        return "continue", "auxiliary client unavailable"
+        return "judge_unavailable", f"judge import failed: {exc}"
 
     try:
         client, model = get_text_auxiliary_client("goal_judge")
     except Exception as exc:
         logger.debug("goal judge: get_text_auxiliary_client failed: %s", exc)
-        return "continue", "auxiliary client unavailable"
+        return "judge_unavailable", f"judge client init failed: {exc}"
 
     if client is None or not model:
-        return "continue", "no auxiliary client configured"
+        return "judge_unavailable", "no auxiliary client configured"
 
     prompt = JUDGE_USER_PROMPT_TEMPLATE.format(
         goal=_truncate(goal, 2000),
         response=_truncate(last_response, _JUDGE_RESPONSE_SNIPPET_CHARS),
     )
 
-    try:
-        resp = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": JUDGE_SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0,
-            max_tokens=200,
-            timeout=timeout,
-        )
-    except Exception as exc:
-        logger.info("goal judge: API call failed (%s) — falling through to continue", exc)
-        return "continue", f"judge error: {type(exc).__name__}"
+    last_exc: Optional[Exception] = None
+    for attempt in range(_JUDGE_MAX_RETRIES + 1):
+        try:
+            resp = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": JUDGE_SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0,
+                max_tokens=200,
+                timeout=timeout,
+            )
+            last_exc = None
+            break
+        except Exception as exc:
+            last_exc = exc
+            if _is_transient_judge_error(exc) and attempt < _JUDGE_MAX_RETRIES:
+                logger.info(
+                    "goal judge: transient error (attempt %d/%d): %s",
+                    attempt + 1, _JUDGE_MAX_RETRIES + 1, exc,
+                )
+                continue
+            # Non-transient or last attempt — no more retries
+            break
+
+    if last_exc is not None:
+        logger.warning("goal judge: API call failed after %d attempt(s): %s", _JUDGE_MAX_RETRIES + 1, last_exc)
+        return "judge_unavailable", f"judge error after {_JUDGE_MAX_RETRIES + 1} attempts: {type(last_exc).__name__}: {last_exc}"
 
     try:
         raw = resp.choices[0].message.content or ""
@@ -560,9 +599,29 @@ class GoalManager:
                 ),
             }
 
+        # ── Judge evaluation ────────────────────────────────────────
         verdict, reason = judge_goal(state.goal, last_response)
         state.last_verdict = verdict
         state.last_reason = reason
+
+        # Judge unavailable (API down after retries) → fail-closed: pause
+        # so the user can resume when the judge is back.  This is safer than
+        # fail-open which silently continues forever.
+        if verdict == "judge_unavailable":
+            state.status = "paused"
+            state.paused_reason = f"judge unavailable: {reason}"
+            save_goal(self.session_id, state)
+            return {
+                "status": "paused",
+                "should_continue": False,
+                "continuation_prompt": None,
+                "verdict": "judge_unavailable",
+                "reason": reason,
+                "message": (
+                    f"⏸ Goal paused — judge API unavailable after {_JUDGE_MAX_RETRIES + 1} attempts. "
+                    "Use /goal resume when the API is back, or /goal clear to stop."
+                ),
+            }
 
         if verdict == "done":
             state.status = "done"

@@ -29,6 +29,7 @@ import type {
   SessionInfo,
   SessionMessage,
   SessionSearchResult,
+  SessionSourceInfo,
   StatusResponse,
 } from "@/lib/api";
 import { timeAgo } from "@/lib/utils";
@@ -43,6 +44,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { DeleteConfirmDialog } from "@/components/DeleteConfirmDialog";
 import { useConfirmDelete } from "@/hooks/useConfirmDelete";
 import { Input } from "@/components/ui/input";
+import { Select, SelectOption } from "@nous-research/ui/ui/components/select";
 import { useSystemActions } from "@/contexts/useSystemActions";
 import { useToast } from "@/hooks/useToast";
 import { useI18n } from "@/i18n";
@@ -425,6 +427,8 @@ export default function SessionsPage() {
   const logScrollRef = useRef<HTMLPreElement | null>(null);
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [overviewSessions, setOverviewSessions] = useState<SessionInfo[]>([]);
+  const [sourceFilter, setSourceFilter] = useState<string>("");
+  const [sources, setSources] = useState<SessionSourceInfo[]>([]);
   const { toast, showToast } = useToast();
   const { t } = useI18n();
   const { setAfterTitle, setEnd } = usePageHeader();
@@ -483,21 +487,30 @@ export default function SessionsPage() {
     total,
   ]);
 
-  const loadSessions = useCallback((p: number) => {
+  const loadSessions = useCallback((p: number, src?: string) => {
     setLoading(true);
+    const source = src !== undefined ? src : sourceFilter;
     api
-      .getSessions(PAGE_SIZE, p * PAGE_SIZE)
+      .getSessions(PAGE_SIZE, p * PAGE_SIZE, source || undefined)
       .then((resp) => {
         setSessions(resp.sessions);
         setTotal(resp.total);
       })
       .catch(() => {})
       .finally(() => setLoading(false));
-  }, []);
+  }, [sourceFilter]);
 
   useEffect(() => {
     loadSessions(page);
   }, [loadSessions, page]);
+
+  // Fetch available sources on mount
+  useEffect(() => {
+    api
+      .getSessionSources()
+      .then((r) => setSources(r.sources))
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     const loadOverview = () => {
@@ -506,7 +519,7 @@ export default function SessionsPage() {
         .then(setStatus)
         .catch(() => {});
       api
-        .getSessions(50)
+        .getSessions(50, 0, sourceFilter || undefined)
         .then((r) => setOverviewSessions(r.sessions))
         .catch(() => {});
     };
@@ -780,6 +793,27 @@ export default function SessionsPage() {
           </CardContent>
         </Card>
       )}
+
+      <div className="flex items-center gap-2">
+        <Select
+          value={sourceFilter}
+          onValueChange={(v) => {
+            setSourceFilter(v);
+            setPage(0);
+          }}
+          className="w-48"
+        >
+          <SelectOption value="">{t.sessions.allPlatforms}</SelectOption>
+          {sources.map((s) => (
+            <SelectOption key={s.source} value={s.source}>
+              {s.source} ({s.count})
+            </SelectOption>
+          ))}
+        </Select>
+        <span className="text-xs text-muted-foreground">
+          {t.sessions.filterByPlatform}
+        </span>
+      </div>
 
       {filtered.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-16 text-muted-foreground">

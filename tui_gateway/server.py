@@ -3311,6 +3311,19 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
         # prompt.submit sets running=True under the history_lock and
         # we check that guard before re-firing.
         if goal_followup:
+            # Re-check goal is still active before firing continuation.
+            # evaluate_after_turn may have marked it done/paused in the
+            # same post-turn hook above.
+            try:
+                from hermes_cli.goals import GoalManager as _GM
+                _sid_key = session.get("session_key") or ""
+                if _sid_key:
+                    _recheck = _GM(session_id=_sid_key)
+                    if not _recheck.is_active():
+                        goal_followup = None
+            except Exception:
+                pass
+        if goal_followup:
             with session["history_lock"]:
                 if session.get("running"):
                     # User already sent something — their turn wins,

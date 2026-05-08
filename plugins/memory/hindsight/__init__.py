@@ -915,10 +915,13 @@ class HindsightMemoryProvider(MemoryProvider):
         return _run_sync(coro, timeout=self._timeout)
 
     def _is_retriable_embedded_connection_error(self, exc: Exception) -> bool:
-        """Return True for stale embedded-daemon connection failures."""
+        """Return True for stale daemon connection failures."""
+        text = f"{type(exc).__name__}: {exc}".lower()
+        # Always retry on timeout — the daemon may have restarted
+        if "timeouterror" in text or "timed out" in text:
+            return True
         if self._mode != "local_embedded":
             return False
-        text = f"{type(exc).__name__}: {exc}".lower()
         return any(
             marker in text
             for marker in (

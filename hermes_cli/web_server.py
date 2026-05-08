@@ -759,13 +759,24 @@ async def get_action_status(name: str, lines: int = 200):
 
 
 @app.get("/api/sessions")
-async def get_sessions(limit: int = 20, offset: int = 0):
+async def get_sessions(
+    limit: int = 20,
+    offset: int = 0,
+    source: Optional[str] = None,
+    exclude_source: Optional[str] = None,
+):
     try:
         from hermes_state import SessionDB
         db = SessionDB()
         try:
-            sessions = db.list_sessions_rich(limit=limit, offset=offset)
-            total = db.session_count()
+            exclude_sources = [s.strip() for s in exclude_source.split(",") if s.strip()] if exclude_source else None
+            sessions = db.list_sessions_rich(
+                limit=limit,
+                offset=offset,
+                source=source,
+                exclude_sources=exclude_sources,
+            )
+            total = db.session_count(source=source)
             now = time.time()
             for s in sessions:
                 s["is_active"] = (
@@ -777,6 +788,29 @@ async def get_sessions(limit: int = 20, offset: int = 0):
             db.close()
     except Exception:
         _log.exception("GET /api/sessions failed")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.get("/api/sessions/sources")
+async def get_session_sources():
+    """Return distinct session sources (platforms) with counts."""
+    try:
+        from hermes_state import SessionDB
+        db = SessionDB()
+        try:
+            cursor = db._conn.execute(
+                "SELECT source, COUNT(*) as cnt FROM sessions "
+                "GROUP BY source ORDER BY cnt DESC"
+            )
+            sources = [
+                {"source": row["source"] or "local", "count": row["cnt"]}
+                for row in cursor.fetchall()
+            ]
+            return {"sources": sources}
+        finally:
+            db.close()
+    except Exception:
+        _log.exception("GET /api/sessions/sources failed")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 

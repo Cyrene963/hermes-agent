@@ -148,6 +148,8 @@ from agent.model_metadata import (
     model_requires_max_completion_tokens,
 )
 from agent.context_compressor import ContextCompressor
+from agent.context_collapse import collapse_messages
+from agent.micro_compact import microcompact_messages, estimate_context_tokens
 from agent.redact import redact_sensitive_text
 from agent.subdirectory_hints import SubdirectoryHintTracker
 from agent.prompt_caching import apply_anthropic_cache_control
@@ -1900,6 +1902,27 @@ class AIAgent:
         compression_enabled = str(_compression_cfg.get("enabled", True)).lower() in ("true", "1", "yes")
         compression_target_ratio = float(_compression_cfg.get("target_ratio", 0.20))
         compression_protect_last = int(_compression_cfg.get("protect_last_n", 20))
+
+        # Micro-compact config: cheap per-turn tool result pruning
+        _mc_cfg = _compression_cfg.get("microcompact", {})
+        if not isinstance(_mc_cfg, dict):
+            _mc_cfg = {}
+        self._microcompact_cfg = {
+            "enabled": str(_mc_cfg.get("enabled", True)).lower() in ("true", "1", "yes"),
+            "keep_recent": int(_mc_cfg.get("keep_recent", 5)),
+            "min_result_chars": int(_mc_cfg.get("min_result_chars", 200)),
+        }
+
+        # Context collapse config: fold long tool outputs
+        _cc_cfg = _compression_cfg.get("context_collapse", {})
+        if not isinstance(_cc_cfg, dict):
+            _cc_cfg = {}
+        self._context_collapse_cfg = {
+            "enabled": str(_cc_cfg.get("enabled", True)).lower() in ("true", "1", "yes"),
+            "max_chars": int(_cc_cfg.get("max_chars", 5000)),
+            "head_chars": int(_cc_cfg.get("head_chars", 500)),
+            "tail_chars": int(_cc_cfg.get("tail_chars", 500)),
+        }
 
         # Read optional explicit context_length override for the auxiliary
         # compression model. Custom endpoints often cannot report this via
@@ -4969,6 +4992,17 @@ class AIAgent:
         # this block.
         if "kanban_show" in self.valid_tool_names:
             tool_guidance.append(KANBAN_GUIDANCE)
+
+        # Per-tool prompt assembly (Claude Code pattern)
+        # Each tool has its own prompt module with specific behavioral
+        # guidance. Only assembled when the tool is available.
+        try:
+            from agent.tool_prompts import get_tool_prompts_for_available_tools
+            _per_tool_prompts = get_tool_prompts_for_available_tools(self.valid_tool_names)
+            if _per_tool_prompts:
+                tool_guidance.append("\n\n".join(_per_tool_prompts))
+        except Exception as _tp_err:
+            logger.debug("per-tool prompts failed (non-fatal): %s", _tp_err)
         if tool_guidance:
             prompt_parts.append(" ".join(tool_guidance))
 
@@ -9362,6 +9396,19 @@ class AIAgent:
             except Exception:
                 pass
 
+        # ── Session memory compact: capture memory before compression ──
+        # Ensures memory authority survives compression by re-injecting
+        # memory with strong authority markers after compaction.
+        _memory_snapshot = {}
+        try:
+            from agent.session_memory_compact import extract_memory_before_compact
+            _memory_snapshot = extract_memory_before_compact(
+                memory_store=getattr(self, '_memory_store', None),
+                memory_manager=getattr(self, '_memory_manager', None),
+            )
+        except Exception as _sm_err:
+            logger.debug("session memory extract failed (non-fatal): %s", _sm_err)
+
         try:
             compressed = self.context_compressor.compress(messages, current_tokens=approx_tokens, focus_topic=focus_topic)
         except TypeError:
@@ -9396,6 +9443,27 @@ class AIAgent:
                     )
 
         todo_snapshot = self._todo_store.format_for_injection()
+
+        # ── Session memory compact: re-inject memory after compression ──
+        if _memory_snapshot:
+            try:
+                from agent.session_memory_compact import reinject_memory_after_compact
+                compressed = reinject_memory_after_compact(compressed, _memory_snapshot)
+            except Exception as _sm_err:
+                logger.debug("session memory re-inject failed (non-fatal): %s", _sm_err)
+
+        # ── Post-compact cleanup: clear stale caches ─────────────────
+        try:
+            from agent.post_compact_cleanup import run_post_compact_cleanup
+            from tools.file_state_cache import file_state_cache
+            from tools.file_tools import _read_tracker
+            run_post_compact_cleanup(
+                file_state_cache=file_state_cache,
+                read_tracker=_read_tracker,
+            )
+        except Exception as _pc_err:
+            logger.debug("post_compact_cleanup failed (non-fatal): %s", _pc_err)
+
         if todo_snapshot:
             compressed.append({"role": "user", "content": todo_snapshot})
 
@@ -11363,6 +11431,46 @@ class AIAgent:
                     cache_ttl=self._cache_ttl,
                     native_anthropic=self._use_native_cache_layout,
                 )
+
+            # ── Micro-compact: prune old tool results ──────────────────
+            # Cheap mechanical pass that clears old tool result content
+            # before expensive LLM-based compression. Inspired by Claude
+            # Code's microCompact strategy.
+            _mc_cfg = getattr(self, '_microcompact_cfg', {})
+            if _mc_cfg.get('enabled', True):
+                _mc_keep = _mc_cfg.get('keep_recent', 5)
+                _mc_min = _mc_cfg.get('min_result_chars', 200)
+                try:
+                    api_messages, _mc_stats = microcompact_messages(
+                        api_messages,
+                        keep_recent=_mc_keep,
+                        min_result_chars=_mc_min,
+                    )
+                    if _mc_stats.get('compacted_count', 0) > 0:
+                        logger.info("microcompact: %s", _mc_stats)
+                except Exception as _mc_err:
+                    logger.debug("microcompact failed (non-fatal): %s", _mc_err)
+
+            # ── Context collapse: fold long tool outputs ───────────────
+            # Replaces very long tool results with head+tail+metadata.
+            # Runs after microcompact (which handles old results) to
+            # collapse any remaining long results.
+            _cc_cfg = getattr(self, '_context_collapse_cfg', {})
+            if _cc_cfg.get('enabled', True):
+                _cc_max = _cc_cfg.get('max_chars', 5000)
+                _cc_head = _cc_cfg.get('head_chars', 500)
+                _cc_tail = _cc_cfg.get('tail_chars', 500)
+                try:
+                    api_messages, _cc_stats = collapse_messages(
+                        api_messages,
+                        max_chars=_cc_max,
+                        head_chars=_cc_head,
+                        tail_chars=_cc_tail,
+                    )
+                    if _cc_stats.get('collapsed_count', 0) > 0:
+                        logger.info("context_collapse: %s", _cc_stats)
+                except Exception as _cc_err:
+                    logger.debug("context_collapse failed (non-fatal): %s", _cc_err)
 
             # Safety net: strip orphaned tool results / add stubs for missing
             # results before sending to the API.  Runs unconditionally — not
