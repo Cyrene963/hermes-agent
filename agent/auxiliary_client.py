@@ -1707,6 +1707,7 @@ def _validate_provider_credentials(
         "openrouter": "OPENROUTER_API_KEY",
         "nous": None,  # Uses OAuth, always available
         "openai-codex": None,  # Uses OAuth
+        "copilot": None,  # Uses OAuth (GitHub Copilot)
         "zai": "GLM_API_KEY",
         "kimi-coding": "KIMI_API_KEY",
         "minimax": "MINIMAX_API_KEY",
@@ -1726,8 +1727,8 @@ def _validate_provider_credentials(
         # Custom providers may not need an API key (e.g., local servers)
         return True
 
-    # Nous and Codex use OAuth — always consider available
-    if normalized in ("nous", "openai-codex"):
+    # Nous, Codex, and Copilot use OAuth — always consider available
+    if normalized in ("nous", "openai-codex", "copilot"):
         return True
 
     # Default: no credentials found
