@@ -105,6 +105,7 @@ JUDGE_SYSTEM_PROMPT = (
 JUDGE_USER_PROMPT_TEMPLATE = (
     "Goal:\n{goal}\n\n"
     "Agent's most recent response:\n{response}\n\n"
+    "{metadata}"
     "Is the goal satisfied?"
 )
 
@@ -132,8 +133,9 @@ class GoalState:
     tokens_used: int = 0                      # approximate tokens consumed
     time_used_seconds: float = 0.0            # wall-clock time
     tool_calls_in_turn: int = 0               # tool calls in the last turn
+    tool_calls_total: int = 0                 # cumulative tool calls across all turns
     consecutive_idle_turns: int = 0           # turns with 0 tool calls in a row
-    goal_suppressed: bool = False             # anti-laziness: stop continuation
+    goal_suppressed: bool = False             # anti-laziness flag
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False)
@@ -155,6 +157,7 @@ class GoalState:
             tokens_used=int(data.get("tokens_used", 0) or 0),
             time_used_seconds=float(data.get("time_used_seconds", 0.0) or 0.0),
             tool_calls_in_turn=int(data.get("tool_calls_in_turn", 0) or 0),
+            tool_calls_total=int(data.get("tool_calls_total", 0) or 0),
             consecutive_idle_turns=int(data.get("consecutive_idle_turns", 0) or 0),
             goal_suppressed=bool(data.get("goal_suppressed", False)),
         )
@@ -311,6 +314,10 @@ def judge_goal(
     last_response: str,
     *,
     timeout: float = DEFAULT_JUDGE_TIMEOUT,
+    turns_used: int = 0,
+    tool_calls_total: int = 0,
+    tokens_used: int = 0,
+    time_used_seconds: float = 0.0,
 ) -> Tuple[str, str]:
     """Ask the auxiliary model whether the goal is satisfied.
 
@@ -322,12 +329,31 @@ def judge_goal(
     non-recoverable error occurs (import failure, misconfigured client), the
     verdict is ``"judge_unavailable"`` so the caller can pause the goal
     instead of silently continuing.
+
+    Metadata params (turns_used, tool_calls_total, tokens_used, time_used_seconds)
+    are passed to the judge so it can make informed decisions about goal completion
+    rather than only seeing the last response text.
     """
     if not goal.strip():
         return "skipped", "empty goal"
     if not last_response.strip():
         # No substantive reply this turn — almost certainly not done yet.
         return "continue", "empty response (nothing to evaluate)"
+
+    # Build metadata context for the judge
+    metadata_parts = []
+    if turns_used > 0:
+        metadata_parts.append(f"- Turns used so far: {turns_used}")
+    if tool_calls_total > 0:
+        metadata_parts.append(f"- Total tool calls across all turns: {tool_calls_total}")
+    if tokens_used > 0:
+        metadata_parts.append(f"- Total tokens consumed: {tokens_used}")
+    if time_used_seconds > 0:
+        metadata_parts.append(f"- Wall-clock time elapsed: {time_used_seconds:.0f}s")
+
+    metadata = ""
+    if metadata_parts:
+        metadata = "Session metadata:\n" + "\n".join(metadata_parts) + "\n\n"
 
     try:
         from agent.auxiliary_client import get_text_auxiliary_client
@@ -347,6 +373,7 @@ def judge_goal(
     prompt = JUDGE_USER_PROMPT_TEMPLATE.format(
         goal=_truncate(goal, 2000),
         response=_truncate(last_response, _JUDGE_RESPONSE_SNIPPET_CHARS),
+        metadata=metadata,
     )
 
     last_exc: Optional[Exception] = None
@@ -555,6 +582,7 @@ class GoalManager:
         if state.created_at > 0:
             state.time_used_seconds = time.time() - state.created_at
         state.tool_calls_in_turn = tool_calls_count
+        state.tool_calls_total += tool_calls_count
 
         # ── Anti-laziness detection (Codex /goal) ────────────────────
         # If this is a continuation turn (not user-initiated) and the model
@@ -600,7 +628,13 @@ class GoalManager:
             }
 
         # ── Judge evaluation ────────────────────────────────────────
-        verdict, reason = judge_goal(state.goal, last_response)
+        verdict, reason = judge_goal(
+            state.goal, last_response,
+            turns_used=state.turns_used,
+            tool_calls_total=state.tool_calls_total,
+            tokens_used=state.tokens_used,
+            time_used_seconds=state.time_used_seconds,
+        )
         state.last_verdict = verdict
         state.last_reason = reason
 
