@@ -28,22 +28,70 @@ query_expansion:
   #   "example_keyword": ["related_term1", "related_term2"]
 
 # ─── Preflight Gate ──────────────────────────────────────────────────
-# Gates dangerous operations based on memory state.
-# Each rule maps a tool name to preflight checks.
-# Default: warn-only (block_on_failure: false).
+# Gates dangerous operations based on tool arguments and/or memory state.
+#
+# Two categories of checks are supported:
+#
+# 1. Structured argument checks (inspect tool call parameters):
+#    - field_required:      field must exist in tool args
+#    - field_equals:        field must equal a specific value
+#    - field_not_equals:    field must NOT equal a specific value
+#    - field_contains:      field must contain a substring
+#    - field_not_contains:  field must NOT contain a substring
+#
+# 2. Memory recall checks (search hindsight for related memories):
+#    - memory_recall / identity / method / safety
+#    - Searches hindsight for the query string
+#    - PASS if found, FAIL if required and not found
+#
+# Rules can combine both types. block_on_failure: true = hard block.
 preflight:
   enabled: false
   # hindsight_api: http://localhost:9177
   # bank_id: hindsight
   # rules: []
   #
-  # Example rule (disabled by default):
+  # Example rules (disabled by default):
   # rules:
+  #   # ── File delivery gate ──
   #   - tool: send_message
-  #     task_type: external_send
+  #     task_type: file_delivery
+  #     trigger_patterns: ["file", "document"]
+  #     block_on_failure: true
   #     checks:
-  #       - type: recipient
-  #         query: "recipient identity"
+  #       # Structured: recipient field must exist
+  #       - type: field_required
+  #         field: recipient
+  #         required: true
+  #         error: "Recipient is required before sending"
+  #       # Structured: method must be the correct one
+  #       - type: field_equals
+  #         field: method
+  #         value: sendDocument
+  #         required: true
+  #         error: "File delivery must use sendDocument"
+  #       # Structured: payload must not contain raw file tags
+  #       - type: field_not_contains
+  #         field: payload
+  #         value: "MEDIA:"
+  #         required: true
+  #         error: "MEDIA tag must not be sent as plain text"
+  #       # Memory: check if we have related experience
+  #       - type: memory_recall
+  #         query: "file delivery sendDocument"
   #         required: false
-  #         error: "Recipient not verified"
-  #     block_on_failure: false
+  #         error: "No related memory found"
+  #
+  #   # ── Destructive command gate ──
+  #   - tool: terminal
+  #     task_type: destructive_command
+  #     trigger_patterns:
+  #       - "rm -rf"
+  #       - "git push --force"
+  #       - "git reset --hard"
+  #     block_on_failure: true
+  #     checks:
+  #       - type: memory_recall
+  #         query: "backup safety confirmation"
+  #         required: false
+  #         error: "No backup verification memory found"

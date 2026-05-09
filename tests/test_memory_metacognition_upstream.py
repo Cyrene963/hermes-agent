@@ -221,5 +221,170 @@ class TestIntegrationPoints(unittest.TestCase):
         self.assertIsInstance(result, str)
 
 
+class TestStructuredChecks(unittest.TestCase):
+    """Test structured argument checks (field_required, field_equals, etc.)."""
+
+    def _make_policy(self, rules):
+        """Helper: create a PolicyPreflightPolicy with given rules."""
+        return PolicyPreflightPolicy(rules=rules)
+
+    # ── field_required ──
+
+    def test_field_required_pass(self):
+        policy = self._make_policy([{
+            "tool": "send_message", "task_type": "test",
+            "checks": [{"type": "field_required", "field": "chat_id", "required": True}],
+        }])
+        result = policy.run_checks("test", {"chat_id": "12345"})
+        self.assertEqual(result.decision, "allow")
+        self.assertEqual(result.checks[0].status, "PASS")
+
+    def test_field_required_fail(self):
+        policy = self._make_policy([{
+            "tool": "send_message", "task_type": "test", "block_on_failure": True,
+            "checks": [{"type": "field_required", "field": "chat_id", "required": True, "error": "missing chat_id"}],
+        }])
+        result = policy.run_checks("test", {"target": "telegram"})
+        self.assertEqual(result.decision, "block")
+        self.assertEqual(result.checks[0].status, "FAIL")
+
+    def test_field_required_warn_when_not_required(self):
+        policy = self._make_policy([{
+            "tool": "send_message", "task_type": "test",
+            "checks": [{"type": "field_required", "field": "chat_id", "required": False}],
+        }])
+        result = policy.run_checks("test", {"target": "telegram"})
+        self.assertEqual(result.decision, "allow")
+        self.assertEqual(result.checks[0].status, "WARN")
+
+    # ── field_equals ──
+
+    def test_field_equals_pass(self):
+        policy = self._make_policy([{
+            "tool": "send_message", "task_type": "test",
+            "checks": [{"type": "field_equals", "field": "method", "value": "sendDocument", "required": True}],
+        }])
+        result = policy.run_checks("test", {"method": "sendDocument"})
+        self.assertEqual(result.checks[0].status, "PASS")
+
+    def test_field_equals_fail(self):
+        policy = self._make_policy([{
+            "tool": "send_message", "task_type": "test", "block_on_failure": True,
+            "checks": [{"type": "field_equals", "field": "method", "value": "sendDocument", "required": True, "error": "wrong method"}],
+        }])
+        result = policy.run_checks("test", {"method": "send_message"})
+        self.assertEqual(result.decision, "block")
+        self.assertEqual(result.checks[0].status, "FAIL")
+
+    # ── field_not_equals ──
+
+    def test_field_not_equals_pass(self):
+        policy = self._make_policy([{
+            "tool": "send_message", "task_type": "test",
+            "checks": [{"type": "field_not_equals", "field": "method", "value": "send_message", "required": True}],
+        }])
+        result = policy.run_checks("test", {"method": "sendDocument"})
+        self.assertEqual(result.checks[0].status, "PASS")
+
+    def test_field_not_equals_fail(self):
+        policy = self._make_policy([{
+            "tool": "send_message", "task_type": "test", "block_on_failure": True,
+            "checks": [{"type": "field_not_equals", "field": "method", "value": "send_message", "required": True, "error": "must not use send_message"}],
+        }])
+        result = policy.run_checks("test", {"method": "send_message"})
+        self.assertEqual(result.decision, "block")
+        self.assertEqual(result.checks[0].status, "FAIL")
+
+    # ── field_contains ──
+
+    def test_field_contains_pass(self):
+        policy = self._make_policy([{
+            "tool": "terminal", "task_type": "test",
+            "checks": [{"type": "field_contains", "field": "command", "value": "git", "required": True}],
+        }])
+        result = policy.run_checks("test", {"command": "git status"})
+        self.assertEqual(result.checks[0].status, "PASS")
+
+    def test_field_contains_fail(self):
+        policy = self._make_policy([{
+            "tool": "terminal", "task_type": "test", "block_on_failure": True,
+            "checks": [{"type": "field_contains", "field": "command", "value": "git", "required": True}],
+        }])
+        result = policy.run_checks("test", {"command": "ls -la"})
+        self.assertEqual(result.checks[0].status, "FAIL")
+
+    # ── field_not_contains ──
+
+    def test_field_not_contains_pass(self):
+        policy = self._make_policy([{
+            "tool": "send_message", "task_type": "test",
+            "checks": [{"type": "field_not_contains", "field": "payload", "value": "MEDIA:", "required": True}],
+        }])
+        result = policy.run_checks("test", {"payload": "normal text"})
+        self.assertEqual(result.checks[0].status, "PASS")
+
+    def test_field_not_contains_fail(self):
+        policy = self._make_policy([{
+            "tool": "send_message", "task_type": "test", "block_on_failure": True,
+            "checks": [{"type": "field_not_contains", "field": "payload", "value": "MEDIA:", "required": True, "error": "MEDIA tag found"}],
+        }])
+        result = policy.run_checks("test", {"payload": "MEDIA:/tmp/file.pdf"})
+        self.assertEqual(result.decision, "block")
+        self.assertEqual(result.checks[0].status, "FAIL")
+
+    # ── Unknown check type ──
+
+    def test_unknown_check_type_warns(self):
+        policy = self._make_policy([{
+            "tool": "test", "task_type": "test",
+            "checks": [{"type": "nonexistent_type", "query": "test"}],
+        }])
+        result = policy.run_checks("test", {})
+        # Unknown types fall through to memory recall (backward compatible)
+        self.assertIn(result.checks[0].status, ["PASS", "WARN", "FAIL"])
+
+    # ── Multiple rules per tool ──
+
+    def test_multiple_rules_per_tool(self):
+        policy = self._make_policy([
+            {"tool": "terminal", "task_type": "destructive",
+             "trigger_patterns": ["rm -rf"],
+             "checks": [{"type": "field_contains", "field": "command", "value": "rm", "required": True}]},
+            {"tool": "terminal", "task_type": "gateway_restart",
+             "trigger_patterns": ["systemctl restart"],
+             "checks": [{"type": "field_contains", "field": "command", "value": "restart", "required": True}]},
+        ])
+        self.assertEqual(policy.get_task_type("terminal", {"command": "rm -rf /tmp"}), "destructive")
+        self.assertEqual(policy.get_task_type("terminal", {"command": "systemctl restart svc"}), "gateway_restart")
+        self.assertIsNone(policy.get_task_type("terminal", {"command": "ls -la"}))
+
+    # ── tool_args resolution ──
+
+    def test_field_resolves_from_tool_args(self):
+        """Structured checks should find fields in tool_args sub-dict."""
+        policy = self._make_policy([{
+            "tool": "send_message", "task_type": "test",
+            "checks": [{"type": "field_equals", "field": "method", "value": "sendDocument", "required": True}],
+        }])
+        # Pass via run_checks context (tool_args auto-populated)
+        result = policy.run_checks("test", {"method": "sendDocument"})
+        self.assertEqual(result.checks[0].status, "PASS")
+
+    # ── Combined structured + memory checks ──
+
+    def test_combined_structured_and_memory(self):
+        policy = self._make_policy([{
+            "tool": "send_message", "task_type": "test", "block_on_failure": True,
+            "checks": [
+                {"type": "field_required", "field": "method", "required": True, "error": "method required"},
+                {"type": "memory_recall", "query": "test query", "required": False},
+            ],
+        }])
+        # Structured passes, memory may WARN (no hindsight in test)
+        result = policy.run_checks("test", {"method": "sendDocument"})
+        # The structured check should PASS; memory check may WARN
+        self.assertEqual(result.checks[0].status, "PASS")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

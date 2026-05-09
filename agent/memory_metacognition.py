@@ -196,15 +196,38 @@ class PolicyQueryExpander(RecallQueryExpander):
 class PolicyPreflightPolicy(MemoryPreflightPolicy):
     """Preflight policy loaded from YAML config.
 
+    Supports two categories of checks:
+
+    1. Memory recall checks (backward compatible):
+       - type: memory / memory_recall / identity / method / safety
+       - Searches hindsight for the query string
+       - PASS if found, FAIL if required and not found
+
+    2. Structured argument checks (new):
+       - type: field_required      — field must exist in context
+       - type: field_equals        — field must equal value
+       - type: field_not_equals    — field must NOT equal value
+       - type: field_contains      — field must contain value
+       - type: field_not_contains  — field must NOT contain value
+
     Config format:
       preflight_rules:
         - tool: send_message
           task_type: outgoing_message
           checks:
-            - type: identity
-              query: recipient
+            - type: field_required
+              field: chat_id
               required: true
-              error: "recipient not verified"
+              error: "chat_id is required"
+            - type: field_equals
+              field: method
+              value: sendDocument
+              required: true
+              error: "must use sendDocument"
+            - type: memory_recall
+              query: "sendDocument usage"
+              required: false
+              error: "no related memory"
           block_on_failure: true
     """
 
@@ -214,7 +237,7 @@ class PolicyPreflightPolicy(MemoryPreflightPolicy):
         self._rules = rules or []
         self._hindsight_api = hindsight_api
         self._bank_id = bank_id
-        # Build lookup: tool_name → rule
+        # Build lookup: tool_name → [rule, ...]
         self._tool_map: Dict[str, List[Dict]] = {}
         for rule in self._rules:
             tool = rule.get("tool", "")
@@ -226,8 +249,15 @@ class PolicyPreflightPolicy(MemoryPreflightPolicy):
         for rule in rules:
             patterns = rule.get("trigger_patterns", [])
             if patterns:
-                cmd = tool_args.get("command", "").lower()
-                if not any(p.lower() in cmd for p in patterns):
+                # Build searchable string from ALL tool_args keys AND values
+                # so patterns can match field names or field values.
+                parts = []
+                for k, v in tool_args.items():
+                    parts.append(str(k))
+                    if isinstance(v, str):
+                        parts.append(v)
+                arg_text = " ".join(parts).lower()
+                if not any(p.lower() in arg_text for p in patterns):
                     continue
             return rule.get("task_type", tool_name)
         return None
@@ -246,19 +276,26 @@ class PolicyPreflightPolicy(MemoryPreflightPolicy):
                 task_type=task_type,
             )
 
+        # Build enriched context: top-level fields + tool_args sub-dict
+        # This allows structured checks to access both context["method"]
+        # and context["tool_args"]["method"] patterns.
+        enriched = dict(context)
+        if "tool_args" not in enriched:
+            enriched["tool_args"] = dict(context)
+
         checks = []
         all_passed = True
         should_block = rule.get("block_on_failure", False)
 
         for check_def in rule.get("checks", []):
-            check = self._run_single_check(check_def, context)
+            check = self._run_single_check(check_def, enriched)
             checks.append(check)
             if check.status == "FAIL":
                 all_passed = False
 
         if not all_passed and should_block:
             decision = "block"
-            reason = "Critical memory checks failed"
+            reason = "Critical preflight checks failed"
         elif not all_passed:
             decision = "warn"
             reason = "Some recommended checks failed"
@@ -274,18 +311,111 @@ class PolicyPreflightPolicy(MemoryPreflightPolicy):
         )
 
     def _run_single_check(self, check_def: Dict, context: Dict) -> PreflightCheck:
-        """Run a single preflight check against hindsight."""
+        """Dispatch a single preflight check to the appropriate handler."""
         check_type = check_def.get("type", "unknown")
-        query_template = check_def.get("query", "")
         required = check_def.get("required", False)
         error_msg = check_def.get("error", "")
 
-        # Interpolate context into query
+        # ── Structured argument checks ──
+        if check_type == "field_required":
+            return self._check_field_required(check_def, context, required, error_msg)
+        if check_type == "field_equals":
+            return self._check_field_equals(check_def, context, required, error_msg)
+        if check_type == "field_not_equals":
+            return self._check_field_not_equals(check_def, context, required, error_msg)
+        if check_type == "field_contains":
+            return self._check_field_contains(check_def, context, required, error_msg)
+        if check_type == "field_not_contains":
+            return self._check_field_not_contains(check_def, context, required, error_msg)
+
+        # ── Memory recall check (backward compatible) ──
+        # Covers: memory, memory_recall, identity, method, safety, unknown
+        return self._check_memory_recall(check_def, context, required, error_msg, check_type)
+
+    def _resolve_field(self, context: Dict, field: str) -> Any:
+        """Resolve a field from context. Checks top-level first, then tool_args."""
+        if field in context:
+            return context[field]
+        tool_args = context.get("tool_args", {})
+        if field in tool_args:
+            return tool_args[field]
+        return None
+
+    def _check_field_required(self, check_def: Dict, context: Dict,
+                               required: bool, error_msg: str) -> PreflightCheck:
+        field = check_def.get("field", "")
+        value = self._resolve_field(context, field)
+        found = value is not None and value != ""
+        status = "PASS" if found else ("FAIL" if required else "WARN")
+        return PreflightCheck(
+            check_type="field_required", query=field,
+            required=required, found=found, status=status,
+            message=error_msg if status != "PASS" else "",
+        )
+
+    def _check_field_equals(self, check_def: Dict, context: Dict,
+                             required: bool, error_msg: str) -> PreflightCheck:
+        field = check_def.get("field", "")
+        expected = check_def.get("value", "")
+        actual = self._resolve_field(context, field)
+        found = actual is not None and str(actual) == str(expected)
+        status = "PASS" if found else ("FAIL" if required else "WARN")
+        return PreflightCheck(
+            check_type="field_equals", query=f"{field}=={expected}",
+            required=required, found=found, status=status,
+            message=error_msg if status != "PASS" else "",
+        )
+
+    def _check_field_not_equals(self, check_def: Dict, context: Dict,
+                                 required: bool, error_msg: str) -> PreflightCheck:
+        field = check_def.get("field", "")
+        forbidden = check_def.get("value", "")
+        actual = self._resolve_field(context, field)
+        # PASS if field doesn't exist OR doesn't equal forbidden value
+        found = actual is not None and str(actual) == str(forbidden)
+        status = "FAIL" if (found and required) else ("WARN" if found else "PASS")
+        return PreflightCheck(
+            check_type="field_not_equals", query=f"{field}!={forbidden}",
+            required=required, found=not found, status=status,
+            message=error_msg if status != "PASS" else "",
+        )
+
+    def _check_field_contains(self, check_def: Dict, context: Dict,
+                               required: bool, error_msg: str) -> PreflightCheck:
+        field = check_def.get("field", "")
+        needle = check_def.get("value", "")
+        actual = self._resolve_field(context, field)
+        found = actual is not None and needle in str(actual)
+        status = "PASS" if found else ("FAIL" if required else "WARN")
+        return PreflightCheck(
+            check_type="field_contains", query=f"{field}~={needle}",
+            required=required, found=found, status=status,
+            message=error_msg if status != "PASS" else "",
+        )
+
+    def _check_field_not_contains(self, check_def: Dict, context: Dict,
+                                   required: bool, error_msg: str) -> PreflightCheck:
+        field = check_def.get("field", "")
+        needle = check_def.get("value", "")
+        actual = self._resolve_field(context, field)
+        contains = actual is not None and needle in str(actual)
+        status = "FAIL" if (contains and required) else ("WARN" if contains else "PASS")
+        return PreflightCheck(
+            check_type="field_not_contains", query=f"{field}!~={needle}",
+            required=required, found=not contains, status=status,
+            message=error_msg if status != "PASS" else "",
+        )
+
+    def _check_memory_recall(self, check_def: Dict, context: Dict,
+                              required: bool, error_msg: str,
+                              check_type: str) -> PreflightCheck:
+        """Legacy memory recall check. Searches hindsight for query."""
+        query_template = check_def.get("query", "")
         query = query_template
         for k, v in context.items():
-            query = query.replace(f"{{{k}}}", str(v))
+            if isinstance(v, str):
+                query = query.replace(f"{{{k}}}", v)
 
-        # Search hindsight
         found = False
         top_memory = ""
         try:
@@ -297,7 +427,7 @@ class PolicyPreflightPolicy(MemoryPreflightPolicy):
             req.add_header("Content-Type", "application/json")
             with urllib.request.urlopen(req, timeout=5) as resp:
                 result = json.loads(resp.read())
-                memories = result.get("memories", [])
+                memories = result.get("memories", result.get("results", []))
                 found = len(memories) > 0
                 if found:
                     top_memory = memories[0].get("text", "")[:100]
@@ -312,11 +442,8 @@ class PolicyPreflightPolicy(MemoryPreflightPolicy):
             status = "PASS"
 
         return PreflightCheck(
-            check_type=check_type,
-            query=query,
-            required=required,
-            found=found,
-            status=status,
+            check_type=check_type, query=query,
+            required=required, found=found, status=status,
             message=error_msg if status != "PASS" else "",
             top_memory=top_memory,
         )
