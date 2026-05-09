@@ -1403,6 +1403,34 @@ def _load_cursorrules(cwd_path: Path) -> str:
     return _truncate_content(cursorrules_content, ".cursorrules")
 
 
+def expand_recall_queries(user_message: str) -> list[str]:
+    """Expand user message into hindsight search queries.
+
+    Delegates to RecallQueryExpander loaded from memory_policy.yaml.
+    Default: passthrough (returns [original_message] only).
+    Returns list of queries: [original_message, expanded1, expanded2, ...]
+    """
+    try:
+        from agent.memory_metacognition import build_query_expander
+        return build_query_expander().expand(user_message)
+    except Exception:
+        return [user_message] if user_message else []
+
+
+def build_memory_index_block() -> str:
+    """Generate a compact memory index for the system prompt.
+
+    Delegates to MemoryIndexProvider loaded from memory_policy.yaml.
+    Default: no-op (returns empty string).
+    Returns empty string on failure (non-blocking).
+    """
+    try:
+        from agent.memory_metacognition import build_index_provider
+        return build_index_provider().build_index()
+    except Exception:
+        return ""
+
+
 def build_context_files_prompt(cwd: Optional[str] = None, skip_soul: bool = False) -> str:
     """Discover and load context files for the system prompt.
 

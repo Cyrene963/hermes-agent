@@ -1,0 +1,49 @@
+# Memory Metacognition Policy — Default (bundled with agent)
+#
+# This file ships with the agent and provides CONSERVATIVE defaults:
+# - Memory index: disabled (no extra tokens unless user opts in)
+# - Query expansion: disabled (original message only)
+# - Preflight: disabled (no blocking, no checks)
+#
+# To customize: copy to ~/.hermes/memory_policy.yaml and edit.
+# Local policy overlays this file (local wins on conflicts).
+#
+# All sections are optional. Missing sections = disabled.
+
+# ─── Memory Index ────────────────────────────────────────────────────
+# Injects a compact summary of the memory store into the system prompt.
+# Helps the model know what categories and recent memories exist.
+memory_index:
+  enabled: false
+  # script_dir: ~/.hermes/scripts   (default)
+  # timeout: 5                      (seconds)
+
+# ─── Query Expansion ─────────────────────────────────────────────────
+# Expands user messages into better hindsight search queries.
+# Maps keywords → list of related terms to also search for.
+query_expansion:
+  enabled: false
+  max_queries: 8
+  # expansions:
+  #   "example_keyword": ["related_term1", "related_term2"]
+
+# ─── Preflight Gate ──────────────────────────────────────────────────
+# Gates dangerous operations based on memory state.
+# Each rule maps a tool name to preflight checks.
+# Default: warn-only (block_on_failure: false).
+preflight:
+  enabled: false
+  # hindsight_api: http://localhost:9177
+  # bank_id: hindsight
+  # rules: []
+  #
+  # Example rule (disabled by default):
+  # rules:
+  #   - tool: send_message
+  #     task_type: external_send
+  #     checks:
+  #       - type: recipient
+  #         query: "recipient identity"
+  #         required: false
+  #         error: "Recipient not verified"
+  #     block_on_failure: false

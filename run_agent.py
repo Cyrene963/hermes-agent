@@ -5392,6 +5392,18 @@ class AIAgent:
             except Exception:
                 pass
 
+        # Memory Index: compact summary of what's in the memory store.
+        # Generated once per session (cached on self).
+        if self._memory_enabled:
+            try:
+                if not hasattr(self, '_memory_index_cached'):
+                    from agent.prompt_builder import build_memory_index_block
+                    self._memory_index_cached = build_memory_index_block()
+                if self._memory_index_cached:
+                    prompt_parts.append(self._memory_index_cached)
+            except Exception:
+                pass  # Non-blocking
+
         has_skills_tools = any(name in self.valid_tool_names for name in ['skills_list', 'skill_view', 'skill_manage'])
         if has_skills_tools:
             avail_toolsets = {
@@ -9850,13 +9862,26 @@ class AIAgent:
         # Check plugin hooks for a block directive before executing anything.
         block_message: Optional[str] = None
         if not pre_tool_block_checked:
+            # Memory Preflight Gate (concurrent path)
+            try:
+                from agent.memory_metacognition import build_preflight_policy
+                _pf_policy = build_preflight_policy()
+                _task_type = _pf_policy.get_task_type(function_name, function_args)
+                if _task_type:
+                    _ctx = {k: str(v)[:100] for k, v in function_args.items()}
+                    _pf = _pf_policy.run_checks(_task_type, _ctx)
+                    if _pf.decision == "block":
+                        _errors = [c.message for c in _pf.checks if c.status == "FAIL" and c.message]
+                        block_message = f"MEMORY PREFLIGHT BLOCKED: {chr(10).join(_errors)}"
+            except Exception:
+                pass  # Non-blocking
             try:
                 from hermes_cli.plugins import get_pre_tool_call_block_message
-                block_message = get_pre_tool_call_block_message(
+                block_message = block_message or get_pre_tool_call_block_message(
                     function_name, function_args, task_id=effective_task_id or "",
                 )
             except Exception:
-                pass
+                pass  # Keep existing block_message if set by preflight gate
         if block_message is not None:
             return json.dumps({"error": block_message}, ensure_ascii=False)
 
@@ -10383,13 +10408,30 @@ class AIAgent:
 
             # Check plugin hooks for a block directive before executing.
             _block_msg: Optional[str] = None
+
+            # Memory Preflight Gate: verify relevant memories for high-risk ops.
+            # Policy-driven: rules loaded from memory_policy.yaml.
+            # Default: no-op (all operations allowed).
+            try:
+                from agent.memory_metacognition import build_preflight_policy
+                _pf_policy = build_preflight_policy()
+                _task_type = _pf_policy.get_task_type(function_name, function_args)
+                if _task_type:
+                    _ctx = {k: str(v)[:100] for k, v in function_args.items()}
+                    _pf = _pf_policy.run_checks(_task_type, _ctx)
+                    if _pf.decision == "block":
+                        _errors = [c.message for c in _pf.checks if c.status == "FAIL" and c.message]
+                        _block_msg = f"MEMORY PREFLIGHT BLOCKED: {chr(10).join(_errors)}"
+            except Exception:
+                pass  # Non-blocking
+
             try:
                 from hermes_cli.plugins import get_pre_tool_call_block_message
-                _block_msg = get_pre_tool_call_block_message(
+                _block_msg = _block_msg or get_pre_tool_call_block_message(
                     function_name, function_args, task_id=effective_task_id or "",
                 )
             except Exception:
-                pass
+                pass  # Keep existing _block_msg if set by preflight gate
 
             _guardrail_block_decision: ToolGuardrailDecision | None = None
             if _block_msg is None:
@@ -11362,7 +11404,25 @@ class AIAgent:
         if self._memory_manager:
             try:
                 _query = original_user_message if isinstance(original_user_message, str) else ""
-                _ext_prefetch_cache = self._memory_manager.prefetch_all(_query) or ""
+                # Auto-Recall Enhancement: expand query with related terms
+                # to improve hindsight recall precision.
+                try:
+                    from agent.prompt_builder import expand_recall_queries
+                    _expanded = expand_recall_queries(_query)
+                    if len(_expanded) > 1:
+                        # Run prefetch for original + expanded queries, deduplicate
+                        _all_prefetch = []
+                        _seen = set()
+                        for _q in _expanded[:5]:  # Cap at 5 to limit latency
+                            _result = self._memory_manager.prefetch_all(_q) or ""
+                            if _result and _result not in _seen:
+                                _seen.add(_result)
+                                _all_prefetch.append(_result)
+                        _ext_prefetch_cache = "\n".join(_all_prefetch) if _all_prefetch else ""
+                    else:
+                        _ext_prefetch_cache = self._memory_manager.prefetch_all(_query) or ""
+                except Exception:
+                    _ext_prefetch_cache = self._memory_manager.prefetch_all(_query) or ""
             except Exception:
                 pass
 
