@@ -719,3 +719,241 @@ def build_strategy_preflight(user_context: Optional[Dict] = None) -> TaskRouting
     bank = _resolve_bank_id(user_context) or routing_cfg.get("bank_id",
                            policy.get("preflight", {}).get("bank_id", "hindsight"))
     return TaskRoutingPreflight(rules=rules, hindsight_api=api, bank_id=bank)
+
+
+# ─── Lesson Promotion / Policy Suggestion ────────────────────────────
+
+LESSON_KEYWORDS = {
+    "query_expansion": [
+        "搜", "搜索", "recall", "search", "扩展", "expand", "关键词",
+        "keyword", "相关词", "related terms",
+    ],
+    "task_routing": [
+        "用", "用这个", "优先", "prefer", "avoid", "别用", "不要用",
+        "方法", "method", "策略", "strategy", "路由", "route",
+        "应该用", "should use", "camoufox", "curl", "browser",
+    ],
+    "preflight": [
+        "检查", "check", "验证", "verify", "必须", "must", "不能",
+        "block", "阻止", "拦截", "阻止", "before", "执行前",
+        "参数", "parameter", "field", "字段",
+    ],
+}
+
+
+@dataclass
+class LessonSuggestion:
+    """A reviewable policy suggestion derived from a lesson."""
+    lesson_text: str              # original lesson
+    lesson_type: str              # "query_expansion" | "task_routing" | "preflight" | "memory_recall"
+    scope: str                    # "public" | "private" | "user_specific"
+    suggestion: Dict[str, Any]    # structured policy patch
+    confidence: str               # "high" | "medium" | "low"
+    reasoning: str                # why this classification
+    applied: bool = False         # whether user confirmed
+
+
+def classify_lesson(lesson_text: str) -> tuple:
+    """Classify a lesson into type and scope.
+
+    Returns (lesson_type, scope, confidence, reasoning).
+    """
+    text_lower = lesson_text.lower()
+
+    # Score each type by keyword matches
+    scores = {}
+    for ltype, keywords in LESSON_KEYWORDS.items():
+        score = sum(1 for kw in keywords if kw.lower() in text_lower)
+        scores[ltype] = score
+
+    # Determine type
+    if not any(scores.values()):
+        return ("memory_recall", "private", "low",
+                "No policy keywords matched; treat as general memory.")
+
+    best_type = max(scores, key=scores.get)
+    best_score = scores[best_type]
+
+    if best_score >= 3:
+        confidence = "high"
+    elif best_score >= 2:
+        confidence = "medium"
+    else:
+        confidence = "low"
+
+    # Determine scope: public if no private indicators
+    private_indicators = [
+        "chat_id", "token", "密码", "password", "key", "secret",
+        "api_key", "我的", "my ", "用户", "user_id", "telegram",
+        "个人", "private",
+    ]
+    is_private = any(ind in text_lower for ind in private_indicators)
+    scope = "private" if is_private else "public"
+
+    reasoning = f"Matched {best_score} keywords for {best_type}. "
+    reasoning += "Contains private indicators." if is_private else "No private indicators."
+
+    return (best_type, scope, confidence, reasoning)
+
+
+def suggest_policy_patch(lesson_text: str,
+                         user_context: Optional[Dict] = None) -> LessonSuggestion:
+    """Generate a policy suggestion from a lesson text.
+
+    Returns a LessonSuggestion that can be reviewed before applying.
+    Does NOT modify any files.
+    """
+    lesson_type, scope, confidence, reasoning = classify_lesson(lesson_text)
+
+    suggestion: Dict[str, Any] = {}
+
+    if lesson_type == "query_expansion":
+        # Extract potential keywords from the lesson
+        # Simple heuristic: look for quoted terms or key phrases
+        import re
+        quoted = re.findall(r'[""\'](.*?)[""\']|「(.*?)」|『(.*?)』', lesson_text)
+        keywords = [q[0] or q[1] or q[2] for q in quoted]
+        if not keywords:
+            # Fallback: use significant words
+            stopwords = {"的", "是", "在", "了", "和", "与", "或", "不", "要", "会",
+                         "the", "a", "an", "is", "are", "was", "were", "be", "been",
+                         "to", "of", "in", "for", "on", "with", "at", "by", "from"}
+            words = re.findall(r'[\w\u4e00-\u9fff]+', lesson_text)
+            keywords = [w for w in words if len(w) > 1 and w.lower() not in stopwords][:5]
+
+        suggestion = {
+            "section": "query_expansion",
+            "action": "add_expansions",
+            "keywords": keywords[:5],
+            "note": "Review keywords before adding to policy.",
+        }
+
+    elif lesson_type == "task_routing":
+        # Extract trigger patterns and preferred method
+        import re
+        urls = re.findall(r'https?://[^\s]+', lesson_text)
+        domains = re.findall(r'[\w-]+\.(com|org|net|io|do|me|cn)', lesson_text)
+
+        suggestion = {
+            "section": "routing_preflight",
+            "action": "add_rule",
+            "trigger_patterns": urls[:3] or domains[:3] or [lesson_text[:50]],
+            "preferred_method": "",
+            "avoid_methods": [],
+            "note": "Fill in preferred_method and avoid_methods before applying.",
+        }
+
+    elif lesson_type == "preflight":
+        suggestion = {
+            "section": "preflight",
+            "action": "add_rule",
+            "tool": "",
+            "task_type": "",
+            "checks": [],
+            "note": "Fill in tool, task_type, and checks before applying.",
+        }
+
+    else:  # memory_recall
+        suggestion = {
+            "section": "memory_only",
+            "action": "retain_as_memory",
+            "note": "No policy change. Store as hindsight memory for recall.",
+        }
+
+    return LessonSuggestion(
+        lesson_text=lesson_text,
+        lesson_type=lesson_type,
+        scope=scope,
+        suggestion=suggestion,
+        confidence=confidence,
+        reasoning=reasoning,
+    )
+
+
+def apply_suggestion(suggestion: LessonSuggestion,
+                     user_context: Optional[Dict] = None,
+                     dry_run: bool = True) -> Dict[str, Any]:
+    """Apply a confirmed lesson suggestion to the appropriate policy file.
+
+    dry_run=True (default): returns what WOULD be written, without writing.
+    dry_run=False: writes to the appropriate policy file.
+
+    Returns dict with: status, file_path, diff_preview, errors.
+    """
+    if suggestion.applied:
+        return {"status": "already_applied", "errors": []}
+
+    # Determine target file
+    scope = suggestion.scope
+    if user_context and user_context.get("user_id"):
+        target_path = _get_user_policy_path(user_context["user_id"])
+        if not target_path:
+            target_path = os.path.join(
+                os.path.expanduser("~"), ".hermes", "memories",
+                f"user_{user_context['user_id']}", "memory_policy.yaml"
+            )
+    else:
+        target_path = os.path.join(
+            os.path.expanduser("~"), ".hermes", "memory_policy.yaml"
+        )
+
+    # Build the patch
+    section = suggestion.suggestion.get("section", "")
+    action = suggestion.suggestion.get("action", "")
+
+    if action == "retain_as_memory":
+        return {
+            "status": "no_policy_change",
+            "message": "Lesson stored as memory only. No policy modification needed.",
+            "file_path": None,
+            "dry_run": dry_run,
+        }
+
+    # For other actions, build a YAML patch preview
+    patch_preview = {
+        section: {
+            "_lesson_source": suggestion.lesson_text[:100],
+            "_confidence": suggestion.confidence,
+            **{k: v for k, v in suggestion.suggestion.items()
+               if k not in ("section", "action", "note")},
+        }
+    }
+
+    if dry_run:
+        return {
+            "status": "dry_run",
+            "file_path": target_path,
+            "would_write": patch_preview,
+            "note": suggestion.suggestion.get("note", ""),
+            "dry_run": True,
+        }
+
+    # Actually write (requires explicit dry_run=False)
+    try:
+        import yaml
+        os.makedirs(os.path.dirname(target_path), exist_ok=True)
+
+        existing = {}
+        if os.path.exists(target_path):
+            with open(target_path) as f:
+                existing = yaml.safe_load(f) or {}
+
+        _deep_merge(existing, patch_preview)
+
+        with open(target_path, "w") as f:
+            yaml.dump(existing, f, default_flow_style=False, allow_unicode=True)
+
+        suggestion.applied = True
+        _POLICY_CACHE.pop(user_context.get("user_id") if user_context else None, None)
+
+        return {
+            "status": "applied",
+            "file_path": target_path,
+            "dry_run": False,
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "errors": [str(e)],
+            "dry_run": False,
+        }

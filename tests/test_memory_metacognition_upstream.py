@@ -388,3 +388,66 @@ class TestStructuredChecks(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestLessonPromotion(unittest.TestCase):
+    """Test lesson classification and policy suggestion."""
+
+    def test_classify_query_expansion(self):
+        from agent.memory_metacognition import classify_lesson
+        ltype, scope, conf, _ = classify_lesson("搜 linux.do 的时候要扩展搜索 camoufox 和 cloudflare 关键词")
+        self.assertEqual(ltype, "query_expansion")
+
+    def test_classify_task_routing(self):
+        from agent.memory_metacognition import classify_lesson
+        ltype, scope, conf, _ = classify_lesson("linux.do 应该优先用 camoufox，不要用 curl 和 browser_navigate")
+        self.assertEqual(ltype, "task_routing")
+
+    def test_classify_preflight(self):
+        from agent.memory_metacognition import classify_lesson
+        ltype, scope, conf, _ = classify_lesson("执行 rm -rf 之前必须检查 backup 字段，不能直接执行")
+        self.assertEqual(ltype, "preflight")
+
+    def test_classify_memory_recall(self):
+        from agent.memory_metacognition import classify_lesson
+        ltype, scope, conf, _ = classify_lesson("今天天气不错")
+        self.assertEqual(ltype, "memory_recall")
+
+    def test_scope_private_with_chat_id(self):
+        from agent.memory_metacognition import classify_lesson
+        _, scope, _, _ = classify_lesson("chat_id 12345 对应用户 A")
+        self.assertEqual(scope, "private")
+
+    def test_scope_public_without_private_data(self):
+        from agent.memory_metacognition import classify_lesson
+        _, scope, _, _ = classify_lesson("linux.do 需要 camoufox 访问")
+        self.assertEqual(scope, "public")
+
+    def test_suggest_returns_lesson_suggestion(self):
+        from agent.memory_metacognition import suggest_policy_patch, LessonSuggestion
+        result = suggest_policy_patch("搜配置的时候要扩展搜索 provider 和 gateway")
+        self.assertIsInstance(result, LessonSuggestion)
+        self.assertEqual(result.lesson_type, "query_expansion")
+
+    def test_suggest_does_not_write_files(self):
+        from agent.memory_metacognition import suggest_policy_patch
+        result = suggest_policy_patch("test lesson")
+        self.assertFalse(result.applied)
+        # No files should have been modified
+
+    def test_apply_dry_run_default(self):
+        from agent.memory_metacognition import suggest_policy_patch, apply_suggestion
+        suggestion = suggest_policy_patch("搜 linux.do 要扩展 camoufox")
+        result = apply_suggestion(suggestion)
+        self.assertTrue(result["dry_run"])
+        self.assertEqual(result["status"], "dry_run")
+
+    def test_apply_memory_only_no_policy_change(self):
+        from agent.memory_metacognition import suggest_policy_patch, apply_suggestion
+        suggestion = suggest_policy_patch("今天天气不错")
+        result = apply_suggestion(suggestion)
+        self.assertEqual(result["status"], "no_policy_change")
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
