@@ -451,7 +451,7 @@ class PolicyPreflightPolicy(MemoryPreflightPolicy):
 
 # ─── Policy loader ───────────────────────────────────────────────────
 
-_POLICY_CACHE: Optional[Dict] = None
+_POLICY_CACHE: Dict[Optional[str], Dict] = {}  # keyed by user_id (None = global)
 _POLICY_FILE_PATHS = [
     # Local private policy (user-specific, not committed)
     os.path.join(os.path.expanduser("~"), ".hermes", "memory_policy.yaml"),
@@ -468,23 +468,52 @@ def _find_default_policy() -> Optional[str]:
     return None
 
 
-def load_policy(force_reload: bool = False) -> Dict[str, Any]:
+def _get_user_policy_path(user_id: Optional[str]) -> Optional[str]:
+    """Get user-specific policy file path."""
+    if not user_id:
+        return None
+    return os.path.join(
+        os.path.expanduser("~"), ".hermes", "memories",
+        f"user_{user_id}", "memory_policy.yaml"
+    )
+
+
+def _resolve_bank_id(user_context: Optional[Dict] = None) -> str:
+    """Resolve hindsight bank_id with per-user isolation.
+
+    Priority:
+    1. user_context["bank_id"] if explicitly provided
+    2. "hindsight-{user_id}" if user_id is available
+    3. "hindsight" (default, no isolation)
+    """
+    if user_context:
+        if user_context.get("bank_id"):
+            return user_context["bank_id"]
+        if user_context.get("user_id"):
+            return f"hindsight-{user_context['user_id']}"
+    return "hindsight"
+
+
+def load_policy(force_reload: bool = False,
+                user_context: Optional[Dict] = None) -> Dict[str, Any]:
     """Load and merge memory metacognition policy.
 
-    Priority: local private > default bundled.
-    Returns dict with keys: index_provider, expander, preflight_policy.
-    Cached after first load unless force_reload=True.
+    With user_context, loads per-user policy overlay on top of global policy.
+    Cache is per-user (keyed by user_id).
+
+    Priority: user private > local private > default bundled.
     """
-    global _POLICY_CACHE
-    if _POLICY_CACHE is not None and not force_reload:
-        return _POLICY_CACHE
+    cache_key = user_context.get("user_id") if user_context else None
+
+    if cache_key in _POLICY_CACHE and not force_reload:
+        return _POLICY_CACHE[cache_key]
 
     try:
         import yaml
     except ImportError:
         logger.warning("PyYAML unavailable; memory metacognition policy disabled")
-        _POLICY_CACHE = {}
-        return _POLICY_CACHE
+        _POLICY_CACHE[cache_key] = {}
+        return _POLICY_CACHE[cache_key]
 
     merged: Dict[str, Any] = {}
 
@@ -511,7 +540,19 @@ def load_policy(force_reload: bool = False) -> Dict[str, Any]:
                 except Exception as e:
                     logger.warning("Failed to load memory policy from %s: %s", path, e)
 
-    _POLICY_CACHE = merged
+        # 3. Overlay user-specific policy (if user_context provided)
+        if user_context and user_context.get("user_id"):
+            user_path = _get_user_policy_path(user_context["user_id"])
+            if user_path and os.path.exists(user_path):
+                try:
+                    with open(user_path) as f:
+                        user_policy = yaml.safe_load(f) or {}
+                    _deep_merge(merged, user_policy)
+                    logger.info("Loaded user policy from %s", user_path)
+                except Exception as e:
+                    logger.warning("Failed to load user policy from %s: %s", user_path, e)
+
+    _POLICY_CACHE[cache_key] = merged
     return merged
 
 
@@ -525,9 +566,9 @@ def _deep_merge(base: Dict, overlay: Dict) -> Dict:
     return base
 
 
-def build_index_provider() -> MemoryIndexProvider:
+def build_index_provider(user_context: Optional[Dict] = None) -> MemoryIndexProvider:
     """Build MemoryIndexProvider from policy config."""
-    policy = load_policy()
+    policy = load_policy(user_context=user_context)
     index_cfg = policy.get("memory_index", {})
     if not index_cfg.get("enabled", False):
         return NoOpIndexProvider()
@@ -536,9 +577,12 @@ def build_index_provider() -> MemoryIndexProvider:
     return ScriptIndexProvider(script_dir=script_dir, timeout=timeout)
 
 
-def build_query_expander() -> RecallQueryExpander:
-    """Build RecallQueryExpander from policy config."""
-    policy = load_policy()
+def build_query_expander(user_context: Optional[Dict] = None) -> RecallQueryExpander:
+    """Build RecallQueryExpander from policy config.
+
+    With user_context, merges global expansions with user-specific expansions.
+    """
+    policy = load_policy(user_context=user_context)
     expansion_cfg = policy.get("query_expansion", {})
     if not expansion_cfg.get("enabled", False):
         return PassthroughExpander()
@@ -547,15 +591,18 @@ def build_query_expander() -> RecallQueryExpander:
     return PolicyQueryExpander(expansions=expansions, max_queries=max_queries)
 
 
-def build_preflight_policy() -> MemoryPreflightPolicy:
-    """Build MemoryPreflightPolicy from policy config."""
-    policy = load_policy()
+def build_preflight_policy(user_context: Optional[Dict] = None) -> MemoryPreflightPolicy:
+    """Build MemoryPreflightPolicy from policy config.
+
+    With user_context, uses per-user bank_id for memory recall checks.
+    """
+    policy = load_policy(user_context=user_context)
     preflight_cfg = policy.get("preflight", {})
     if not preflight_cfg.get("enabled", False):
         return NoOpPreflightPolicy()
     rules = preflight_cfg.get("rules", [])
     api = preflight_cfg.get("hindsight_api", "http://localhost:9177")
-    bank = preflight_cfg.get("bank_id", "hindsight")
+    bank = _resolve_bank_id(user_context) or preflight_cfg.get("bank_id", "hindsight")
     return PolicyPreflightPolicy(rules=rules, hindsight_api=api, bank_id=bank)
 
 
@@ -660,15 +707,15 @@ class TaskRoutingPreflight:
             return []
 
 
-def build_strategy_preflight() -> TaskRoutingPreflight:
+def build_strategy_preflight(user_context: Optional[Dict] = None) -> TaskRoutingPreflight:
     """Build TaskRoutingPreflight from policy config."""
-    policy = load_policy()
+    policy = load_policy(user_context=user_context)
     routing_cfg = policy.get("routing_preflight", {})
     if not routing_cfg.get("enabled", False):
         return TaskRoutingPreflight()  # no-op (empty rules)
     rules = routing_cfg.get("rules", [])
     api = routing_cfg.get("hindsight_api",
                            policy.get("preflight", {}).get("hindsight_api", "http://localhost:9177"))
-    bank = routing_cfg.get("bank_id",
+    bank = _resolve_bank_id(user_context) or routing_cfg.get("bank_id",
                            policy.get("preflight", {}).get("bank_id", "hindsight"))
     return TaskRoutingPreflight(rules=rules, hindsight_api=api, bank_id=bank)

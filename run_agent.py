@@ -5398,7 +5398,8 @@ class AIAgent:
             try:
                 if not hasattr(self, '_memory_index_cached'):
                     from agent.prompt_builder import build_memory_index_block
-                    self._memory_index_cached = build_memory_index_block()
+                    _uc = {"user_id": self._user_id, "chat_id": self._chat_id} if self._user_id else None
+                    self._memory_index_cached = build_memory_index_block(user_context=_uc)
                 if self._memory_index_cached:
                     prompt_parts.append(self._memory_index_cached)
             except Exception:
@@ -9865,7 +9866,8 @@ class AIAgent:
             # Memory Preflight Gate (concurrent path)
             try:
                 from agent.memory_metacognition import build_preflight_policy
-                _pf_policy = build_preflight_policy()
+                _pf_uc = {"user_id": self._user_id, "chat_id": self._chat_id} if self._user_id else None
+                _pf_policy = build_preflight_policy(user_context=_pf_uc)
                 _task_type = _pf_policy.get_task_type(function_name, function_args)
                 if _task_type:
                     _ctx = {k: str(v)[:100] for k, v in function_args.items()}
@@ -10414,7 +10416,8 @@ class AIAgent:
             # Default: no-op (all operations allowed).
             try:
                 from agent.memory_metacognition import build_preflight_policy
-                _pf_policy = build_preflight_policy()
+                _pf_uc = {"user_id": self._user_id, "chat_id": self._chat_id} if self._user_id else None
+                _pf_policy = build_preflight_policy(user_context=_pf_uc)
                 _task_type = _pf_policy.get_task_type(function_name, function_args)
                 if _task_type:
                     _ctx = {k: str(v)[:100] for k, v in function_args.items()}
@@ -11408,7 +11411,8 @@ class AIAgent:
                 # to improve hindsight recall precision.
                 try:
                     from agent.prompt_builder import expand_recall_queries
-                    _expanded = expand_recall_queries(_query)
+                    _qe_uc = {"user_id": self._user_id, "chat_id": self._chat_id} if self._user_id else None
+                    _expanded = expand_recall_queries(_query, user_context=_qe_uc)
                     if len(_expanded) > 1:
                         # Run prefetch for original + expanded queries, deduplicate
                         _all_prefetch = []
@@ -11431,7 +11435,8 @@ class AIAgent:
         # and injects the hint so the model plans with prior knowledge, not after failure.
         try:
             from agent.memory_metacognition import build_strategy_preflight
-            _strat = build_strategy_preflight()
+            _sr_uc = {"user_id": self._user_id, "chat_id": self._chat_id} if self._user_id else None
+            _strat = build_strategy_preflight(user_context=_sr_uc)
             _hint = _strat.check(original_user_message if isinstance(original_user_message, str) else "")
             if _hint:
                 _hint_text = (

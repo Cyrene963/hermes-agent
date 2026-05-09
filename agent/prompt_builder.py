@@ -1403,7 +1403,7 @@ def _load_cursorrules(cwd_path: Path) -> str:
     return _truncate_content(cursorrules_content, ".cursorrules")
 
 
-def expand_recall_queries(user_message: str) -> list[str]:
+def expand_recall_queries(user_message: str, user_context: dict = None) -> list[str]:
     """Expand user message into hindsight search queries.
 
     Delegates to RecallQueryExpander loaded from memory_policy.yaml.
@@ -1412,12 +1412,12 @@ def expand_recall_queries(user_message: str) -> list[str]:
     """
     try:
         from agent.memory_metacognition import build_query_expander
-        return build_query_expander().expand(user_message)
+        return build_query_expander(user_context=user_context).expand(user_message)
     except Exception:
         return [user_message] if user_message else []
 
 
-def build_memory_index_block() -> str:
+def build_memory_index_block(user_context: dict = None) -> str:
     """Generate a compact memory index for the system prompt.
 
     Delegates to MemoryIndexProvider loaded from memory_policy.yaml.
@@ -1426,7 +1426,7 @@ def build_memory_index_block() -> str:
     """
     try:
         from agent.memory_metacognition import build_index_provider
-        return build_index_provider().build_index()
+        return build_index_provider(user_context=user_context).build_index()
     except Exception:
         return ""
 
