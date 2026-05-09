@@ -557,3 +557,118 @@ def build_preflight_policy() -> MemoryPreflightPolicy:
     api = preflight_cfg.get("hindsight_api", "http://localhost:9177")
     bank = preflight_cfg.get("bank_id", "hindsight")
     return PolicyPreflightPolicy(rules=rules, hindsight_api=api, bank_id=bank)
+
+
+# ─── Task Routing / Strategy Recall ──────────────────────────────────
+
+@dataclass
+class StrategyHint:
+    """Output from task routing preflight. Injected into agent planning."""
+    task_type: str                    # e.g. "cloudflare_site_access"
+    recommended_strategy: str         # e.g. "use_camoufox"
+    avoid_methods: List[str]          # e.g. ["browser_navigate", "curl"]
+    preferred_method: str             # e.g. "camoufox"
+    reason: str                       # human-readable explanation
+    confidence: str                   # "high", "medium", "low"
+    recall_hits: int                  # how many memories matched
+
+
+class TaskRoutingPreflight:
+    """Strategy recall gate — runs BEFORE tool selection.
+
+    Matches user_message against routing rules. If triggered, searches
+    hindsight for strategy memories and returns a StrategyHint that
+    should be injected into the agent's planning context.
+
+    Default: disabled (no-op). Controlled by routing_preflight in policy.
+    """
+
+    def __init__(self, rules: Optional[List[Dict]] = None,
+                 hindsight_api: str = "http://localhost:9177",
+                 bank_id: str = "hindsight"):
+        self._rules = rules or []
+        self._hindsight_api = hindsight_api
+        self._bank_id = bank_id
+
+    def check(self, user_message: str) -> Optional[StrategyHint]:
+        """Check user_message against routing rules. Returns StrategyHint or None."""
+        if not user_message or not self._rules:
+            return None
+
+        msg_lower = user_message.lower()
+
+        for rule in self._rules:
+            patterns = rule.get("trigger_patterns", [])
+            if not patterns:
+                continue
+
+            # Match trigger patterns against user message
+            if not any(p.lower() in msg_lower for p in patterns):
+                continue
+
+            # Triggered — run recall for strategy memories
+            recall_queries = rule.get("recall_queries", [])
+            if not recall_queries:
+                recall_queries = [user_message]
+
+            total_hits = 0
+            top_reasons = []
+            for query in recall_queries[:3]:  # Cap at 3 queries
+                try:
+                    hits = self._recall(query)
+                    total_hits += len(hits)
+                    for h in hits[:2]:
+                        text = h.get("text", "")[:150]
+                        if text:
+                            top_reasons.append(text)
+                except Exception:
+                    pass
+
+            # Build confidence from hit count
+            if total_hits >= 3:
+                confidence = "high"
+            elif total_hits >= 1:
+                confidence = "medium"
+            else:
+                confidence = "low"
+
+            return StrategyHint(
+                task_type=rule.get("task_type", "unknown"),
+                recommended_strategy=rule.get("preferred_method", ""),
+                avoid_methods=rule.get("avoid_methods", []),
+                preferred_method=rule.get("preferred_method", ""),
+                reason=rule.get("strategy_hint", "") or "; ".join(top_reasons[:2]),
+                confidence=confidence,
+                recall_hits=total_hits,
+            )
+
+        return None
+
+    def _recall(self, query: str) -> List[Dict]:
+        """Search hindsight for strategy memories."""
+        try:
+            import json
+            import urllib.request
+            url = f"{self._hindsight_api}/v1/default/banks/{self._bank_id}/memories/recall"
+            data = json.dumps({"query": query, "budget": "low", "max_tokens": 512}).encode()
+            req = urllib.request.Request(url, data=data, method="POST")
+            req.add_header("Content-Type", "application/json")
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                result = json.loads(resp.read())
+                return result.get("results", result.get("memories", []))
+        except Exception:
+            return []
+
+
+def build_strategy_preflight() -> TaskRoutingPreflight:
+    """Build TaskRoutingPreflight from policy config."""
+    policy = load_policy()
+    routing_cfg = policy.get("routing_preflight", {})
+    if not routing_cfg.get("enabled", False):
+        return TaskRoutingPreflight()  # no-op (empty rules)
+    rules = routing_cfg.get("rules", [])
+    api = routing_cfg.get("hindsight_api",
+                           policy.get("preflight", {}).get("hindsight_api", "http://localhost:9177"))
+    bank = routing_cfg.get("bank_id",
+                           policy.get("preflight", {}).get("bank_id", "hindsight"))
+    return TaskRoutingPreflight(rules=rules, hindsight_api=api, bank_id=bank)

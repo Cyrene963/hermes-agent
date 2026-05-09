@@ -45,6 +45,21 @@ query_expansion:
 #    - PASS if found, FAIL if required and not found
 #
 # Rules can combine both types. block_on_failure: true = hard block.
+
+# ─── Task Routing Preflight (Strategy Recall Gate) ────────────────
+# Runs BEFORE tool selection. Matches user message against known
+# strategies and injects hints so the model plans with prior experience.
+# Output is a hint (not a block) — the model still decides, but with context.
+routing_preflight:
+  enabled: false
+  # rules:
+  #   - task_type: site_access
+  #     trigger_patterns: ["example.com"]
+  #     recall_queries: ["example.com access method"]
+  #     preferred_method: "browser_navigate"
+  #     avoid_methods: ["curl"]
+  #     strategy_hint: "Use browser for example.com"
+
 preflight:
   enabled: false
   # hindsight_api: http://localhost:9177

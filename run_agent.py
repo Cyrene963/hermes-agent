@@ -11426,6 +11426,29 @@ class AIAgent:
             except Exception:
                 pass
 
+        # ── Task Routing Preflight: inject strategy hint before planning ──
+        # Searches hindsight for known strategies (e.g., "linux.do needs Camoufox")
+        # and injects the hint so the model plans with prior knowledge, not after failure.
+        try:
+            from agent.memory_metacognition import build_strategy_preflight
+            _strat = build_strategy_preflight()
+            _hint = _strat.check(original_user_message if isinstance(original_user_message, str) else "")
+            if _hint:
+                _hint_text = (
+                    f"## Strategy Recall (from prior experience)\n"
+                    f"Task: {_hint.task_type}\n"
+                    f"Recommended: {_hint.preferred_method}\n"
+                )
+                if _hint.avoid_methods:
+                    _hint_text += f"Avoid: {', '.join(_hint.avoid_methods)}\n"
+                if _hint.reason:
+                    _hint_text += f"Reason: {_hint.reason}\n"
+                _hint_text += f"Confidence: {_hint.confidence} ({_hint.recall_hits} memories)\n"
+                # Inject as system message before the tool loop starts
+                messages.append({"role": "system", "content": _hint_text})
+        except Exception:
+            pass  # Non-blocking
+
         while (api_call_count < self.max_iterations and self.iteration_budget.remaining > 0) or self._budget_grace_call:
             # Reset per-turn checkpoint dedup so each iteration can take one snapshot
             self._checkpoint_mgr.new_turn()
