@@ -870,13 +870,34 @@ def suggest_policy_patch(lesson_text: str,
     )
 
 
+def _sanitize_lesson_text(text: str) -> str:
+    """Remove private indicators from lesson text for safe preview/logging."""
+    import re
+    # Mask chat_id patterns
+    text = re.sub(r'chat_id\s*[:=]\s*\S+', 'chat_id=[REDACTED]', text)
+    # Mask token/key patterns
+    text = re.sub(r'(token|key|secret|password|api_key)\s*[:=]\s*\S+', r'\1=[REDACTED]', text, flags=re.IGNORECASE)
+    # Mask long numeric IDs (likely chat_id)
+    text = re.sub(r'\b\d{8,}\b', '[ID]', text)
+    return text
+
+
 def apply_suggestion(suggestion: LessonSuggestion,
                      user_context: Optional[Dict] = None,
-                     dry_run: bool = True) -> Dict[str, Any]:
+                     dry_run: bool = True,
+                     shared: bool = False) -> Dict[str, Any]:
     """Apply a confirmed lesson suggestion to the appropriate policy file.
 
     dry_run=True (default): returns what WOULD be written, without writing.
     dry_run=False: writes to the appropriate policy file.
+    shared=True: explicit confirmation to write to global/shared policy.
+                  Required when target would be global policy.
+
+    Safety rules:
+    - scope=private without user_context → REFUSE (prevent leak to global)
+    - scope=public without user_context and without shared=True → REFUSE
+    - _lesson_source is sanitized before including in preview/logs
+    - user_id comes from runtime metadata only, never from lesson text
 
     Returns dict with: status, file_path, diff_preview, errors.
     """
@@ -885,7 +906,10 @@ def apply_suggestion(suggestion: LessonSuggestion,
 
     # Determine target file
     scope = suggestion.scope
-    if user_context and user_context.get("user_id"):
+    has_user = bool(user_context and user_context.get("user_id"))
+
+    if has_user:
+        # User-specific policy (safe)
         target_path = _get_user_policy_path(user_context["user_id"])
         if not target_path:
             target_path = os.path.join(
@@ -893,6 +917,19 @@ def apply_suggestion(suggestion: LessonSuggestion,
                 f"user_{user_context['user_id']}", "memory_policy.yaml"
             )
     else:
+        # Global policy — require explicit shared confirmation
+        if scope == "private":
+            return {
+                "status": "refused",
+                "errors": ["Private lesson cannot be written to global policy without user_context."],
+                "dry_run": dry_run,
+            }
+        if not shared:
+            return {
+                "status": "refused",
+                "errors": ["Writing to shared/global policy requires explicit shared=True confirmation."],
+                "dry_run": dry_run,
+            }
         target_path = os.path.join(
             os.path.expanduser("~"), ".hermes", "memory_policy.yaml"
         )
@@ -909,10 +946,13 @@ def apply_suggestion(suggestion: LessonSuggestion,
             "dry_run": dry_run,
         }
 
+    # Sanitize lesson text for preview
+    sanitized_source = _sanitize_lesson_text(suggestion.lesson_text[:100])
+
     # For other actions, build a YAML patch preview
     patch_preview = {
         section: {
-            "_lesson_source": suggestion.lesson_text[:100],
+            "_lesson_source": sanitized_source,
             "_confidence": suggestion.confidence,
             **{k: v for k, v in suggestion.suggestion.items()
                if k not in ("section", "action", "note")},

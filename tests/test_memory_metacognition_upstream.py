@@ -438,15 +438,92 @@ class TestLessonPromotion(unittest.TestCase):
     def test_apply_dry_run_default(self):
         from agent.memory_metacognition import suggest_policy_patch, apply_suggestion
         suggestion = suggest_policy_patch("搜 linux.do 要扩展 camoufox")
-        result = apply_suggestion(suggestion)
+        result = apply_suggestion(suggestion, user_context={"user_id": "test"})
         self.assertTrue(result["dry_run"])
         self.assertEqual(result["status"], "dry_run")
 
     def test_apply_memory_only_no_policy_change(self):
         from agent.memory_metacognition import suggest_policy_patch, apply_suggestion
         suggestion = suggest_policy_patch("今天天气不错")
-        result = apply_suggestion(suggestion)
+        result = apply_suggestion(suggestion, user_context={"user_id": "test"})
         self.assertEqual(result["status"], "no_policy_change")
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
+
+
+class TestLessonPromotionSecurity(unittest.TestCase):
+    """Security tests for lesson promotion."""
+
+    def test_private_scope_no_user_context_refused(self):
+        """Private lesson without user_context must NOT write to global policy."""
+        from agent.memory_metacognition import suggest_policy_patch, apply_suggestion
+        s = suggest_policy_patch("chat_id 12345 对应 Steven")
+        self.assertEqual(s.scope, "private")
+        r = apply_suggestion(s, user_context=None, dry_run=False)
+        self.assertEqual(r["status"], "refused")
+        self.assertIn("Private lesson", r["errors"][0])
+
+    def test_public_scope_no_user_context_no_shared_refused(self):
+        """Public lesson without user_context and without shared=True must NOT write."""
+        from agent.memory_metacognition import suggest_policy_patch, apply_suggestion
+        s = suggest_policy_patch("搜 linux.do 要扩展 camoufox")
+        self.assertEqual(s.scope, "public")
+        r = apply_suggestion(s, user_context=None, dry_run=False, shared=False)
+        self.assertEqual(r["status"], "refused")
+        self.assertIn("shared=True", r["errors"][0])
+
+    def test_public_scope_shared_allowed(self):
+        """Public lesson with shared=True can write to global policy."""
+        from agent.memory_metacognition import suggest_policy_patch, apply_suggestion
+        s = suggest_policy_patch("搜 linux.do 要扩展 camoufox")
+        r = apply_suggestion(s, user_context=None, dry_run=True, shared=True)
+        self.assertEqual(r["status"], "dry_run")
+
+    def test_user_context_writes_to_user_policy(self):
+        """With user_context, writes to user-specific policy (not global)."""
+        from agent.memory_metacognition import suggest_policy_patch, apply_suggestion
+        s = suggest_policy_patch("搜 linux.do 要扩展 camoufox")
+        r = apply_suggestion(s, user_context={"user_id": "test_user"}, dry_run=True)
+        self.assertEqual(r["status"], "dry_run")
+        self.assertIn("user_test_user", r["file_path"])
+
+    def test_dry_run_default(self):
+        """apply_suggestion defaults to dry_run=True."""
+        from agent.memory_metacognition import suggest_policy_patch, apply_suggestion
+        s = suggest_policy_patch("test lesson")
+        r = apply_suggestion(s, user_context={"user_id": "x"})
+        self.assertTrue(r["dry_run"])
+
+    def test_natural_language_does_not_trigger_write(self):
+        """Natural language 'I confirm' does NOT call apply_suggestion(dry_run=False)."""
+        from agent.memory_metacognition import suggest_policy_patch, apply_suggestion
+        # Use a query_expansion lesson (not memory_recall) to test dry_run
+        s = suggest_policy_patch("搜配置的时候要扩展搜索 provider")
+        # Even if someone says "I confirm", the function defaults to dry_run
+        r = apply_suggestion(s, user_context={"user_id": "x"})
+        self.assertTrue(r["dry_run"])
+        self.assertEqual(r["status"], "dry_run")
+
+    def test_sanitized_lesson_text(self):
+        """_lesson_source in preview should be sanitized."""
+        from agent.memory_metacognition import _sanitize_lesson_text
+        raw = "chat_id 123456789 对应 Steven，token=abc123secret"
+        sanitized = _sanitize_lesson_text(raw)
+        self.assertNotIn("123456789", sanitized)
+        self.assertIn("[ID]", sanitized)
+        self.assertIn("[REDACTED]", sanitized)
+        self.assertNotIn("abc123secret", sanitized)
+
+    def test_user_id_from_runtime_not_text(self):
+        """user_id in target path comes from user_context, not lesson text."""
+        from agent.memory_metacognition import suggest_policy_patch, apply_suggestion
+        # Lesson mentions a user_id but user_context is different
+        s = suggest_policy_patch("用户 user_xyz 的配置")
+        r = apply_suggestion(s, user_context={"user_id": "actual_user"}, dry_run=True)
+        self.assertIn("user_actual_user", r["file_path"])
+        self.assertNotIn("user_xyz", r["file_path"])
 
 
 if __name__ == "__main__":
