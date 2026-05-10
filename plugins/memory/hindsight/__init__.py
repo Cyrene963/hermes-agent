@@ -34,6 +34,7 @@ import importlib
 import json
 import logging
 import os
+import re
 import queue
 import threading
 
@@ -855,6 +856,7 @@ class HindsightMemoryProvider(MemoryProvider):
             {"key": "recall_tags_match", "description": "Tag matching mode for recall", "default": "any", "choices": ["any", "all", "any_strict", "all_strict"]},
             {"key": "auto_recall", "description": "Automatically recall memories before each turn", "default": True},
             {"key": "auto_retain", "description": "Automatically retain conversation turns", "default": True},
+            {"key": "commitment_detection", "description": "Auto-retain on behavioral commitment language (lesson tagging)", "default": True},
             {"key": "retain_every_n_turns", "description": "Retain every N turns (1 = every turn)", "default": 1},
             {"key": "retain_async","description": "Process retain asynchronously on the Hindsight server", "default": True},
             {"key": "retain_context", "description": "Context label for retained memories", "default": "conversation between Hermes Agent and the User"},
@@ -1172,6 +1174,7 @@ class HindsightMemoryProvider(MemoryProvider):
         # Retain controls
         self._auto_retain = self._config.get("auto_retain", True)
         self._retain_every_n_turns = max(1, int(self._config.get("retain_every_n_turns", 1)))
+        self._commitment_detection = self._config.get("commitment_detection", True)
         self._retain_context = self._config.get("retain_context", "conversation between Hermes Agent and the User")
 
         # Recall controls
@@ -1195,10 +1198,11 @@ class HindsightMemoryProvider(MemoryProvider):
                          self._bank_id_template, self._agent_identity, self._agent_workspace,
                          self._platform, self._user_id, self._bank_id)
         logger.debug("Hindsight config: auto_retain=%s, auto_recall=%s, retain_every_n=%d, "
-                     "retain_async=%s, retain_context=%s, recall_max_tokens=%d, recall_max_input_chars=%d, tags=%s, recall_tags=%s",
+                     "retain_async=%s, retain_context=%s, recall_max_tokens=%d, recall_max_input_chars=%d, "
+                     "tags=%s, recall_tags=%s, commitment_detection=%s",
                      self._auto_retain, self._auto_recall, self._retain_every_n_turns,
                      self._retain_async, self._retain_context, self._recall_max_tokens, self._recall_max_input_chars,
-                     self._tags, self._recall_tags)
+                     self._tags, self._recall_tags, self._commitment_detection)
 
         # For local mode, start the embedded daemon in the background so it
         # doesn't block the chat. Redirect stdout/stderr to a log file to
@@ -1403,6 +1407,74 @@ class HindsightMemoryProvider(MemoryProvider):
             kwargs["tags"] = merged_tags
         return kwargs
 
+    def _detect_commitment(self, user_content: str, assistant_content: str) -> bool:
+        """Detect behavioral commitment via LLM classification.
+
+        Uses the auxiliary model (cheap, fast) to semantically determine
+        whether the assistant made a behavioral promise (not a task plan).
+        Language-agnostic — works for any language without pattern lists.
+
+        Returns True if a behavioral commitment is detected with confidence >= 0.7.
+        Returns False on any error (fail-open, never blocks the agent loop).
+        """
+        if not user_content.strip() or not assistant_content.strip():
+            return False
+
+        # Truncate to avoid wasting tokens on long turns
+        user_excerpt = user_content[:500]
+        asst_excerpt = assistant_content[:500]
+
+        try:
+            from agent.auxiliary_client import call_llm
+
+            response = call_llm(
+                task="commitment_detection",
+                messages=[
+                    {"role": "system", "content": (
+                        "You are a classifier. Determine if the assistant's response "
+                        "contains a BEHAVIORAL COMMITMENT — a promise to change how it "
+                        "operates in the future (e.g., 'I will remember to save this', "
+                        "'from now on I will verify before responding').\n\n"
+                        "NOT a behavioral commitment:\n"
+                        "- Task plans: 'I'll run the tests next', 'I'll create the file'\n"
+                        "- Status updates: 'I'll check and let you know'\n"
+                        "- Simple acknowledgments: 'I understand', 'noted'\n\n"
+                        "IS a behavioral commitment:\n"
+                        "- Promises to change approach: 'I will always verify first'\n"
+                        "- Lesson acknowledgment: 'I won't make this mistake again'\n"
+                        "- Process change: 'from now on I will save immediately'\n\n"
+                        "Respond with ONLY a JSON object: "
+                        '{"commitment": true/false, "confidence": 0.0-1.0}'
+                    )},
+                    {"role": "user", "content": (
+                        f"User message:\n{user_excerpt}\n\n"
+                        f"Assistant response:\n{asst_excerpt}"
+                    )},
+                ],
+                temperature=0.0,
+                max_tokens=50,
+                timeout=5,
+            )
+
+            content = response.choices[0].message.content.strip()
+            # Parse JSON from response (handle markdown code blocks)
+            if "```" in content:
+                content = content.split("```")[1].strip()
+                if content.startswith("json"):
+                    content = content[4:].strip()
+            result = json.loads(content)
+            is_commitment = result.get("commitment", False)
+            confidence = result.get("confidence", 0.0)
+            logger.debug(
+                "Commitment detection: commitment=%s, confidence=%.2f",
+                is_commitment, confidence,
+            )
+            return is_commitment and confidence >= 0.7
+
+        except Exception as e:
+            logger.debug("Commitment detection failed (non-fatal): %s", e)
+            return False
+
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
         """Enqueue a retain for the current turn. Non-blocking.
 
@@ -1425,6 +1497,48 @@ class HindsightMemoryProvider(MemoryProvider):
         self._session_turns.append(turn)
         self._turn_counter += 1
         self._turn_index = self._turn_counter
+
+        # --- Commitment detection: immediate retain on behavioral promises ---
+        if self._commitment_detection and self._detect_commitment(user_content, assistant_content):
+            logger.debug("sync_turn: commitment detected, immediate retain")
+            commitment_content = json.dumps(
+                self._build_turn_messages(user_content, assistant_content),
+                ensure_ascii=False,
+            )
+            commitment_tags = ["lesson", "commitment"]
+            if self._session_id:
+                commitment_tags.append(f"session:{self._session_id}")
+
+            metadata_snap = self._build_metadata(message_count=2, turn_index=self._turn_index)
+            doc_id, upd_mode = self._resolve_retain_target(self._document_id)
+            bank = self._bank_id
+            async_flag = self._retain_async
+
+            def _do_commitment_retain() -> None:
+                item = self._build_retain_kwargs(
+                    commitment_content,
+                    context="commitment_detection",
+                    metadata=metadata_snap,
+                    tags=commitment_tags,
+                )
+                item.pop("bank_id", None)
+                item.pop("retain_async", None)
+                if upd_mode is not None:
+                    item["update_mode"] = upd_mode
+                self._run_hindsight_operation(
+                    lambda client: client.aretain_batch(
+                        bank_id=bank,
+                        items=[item],
+                        document_id=doc_id,
+                        retain_async=async_flag,
+                    )
+                )
+                logger.debug("Commitment retain succeeded")
+
+            self._ensure_writer()
+            self._register_atexit()
+            self._retain_queue.put(_do_commitment_retain)
+        # --- End commitment detection ---
 
         if self._turn_counter % self._retain_every_n_turns != 0:
             logger.debug("sync_turn: buffered turn %d (will retain at turn %d)",
