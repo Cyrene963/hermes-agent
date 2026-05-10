@@ -233,10 +233,12 @@ class PolicyPreflightPolicy(MemoryPreflightPolicy):
 
     def __init__(self, rules: Optional[List[Dict]] = None,
                  hindsight_api: str = "http://localhost:9177",
-                 bank_id: str = "hindsight"):
+                 bank_id: str = "hindsight",
+                 execution_context: Optional[Dict[str, Any]] = None):
         self._rules = rules or []
         self._hindsight_api = hindsight_api
         self._bank_id = bank_id
+        self._execution_context = execution_context or {}
         # Build lookup: tool_name → [rule, ...]
         self._tool_map: Dict[str, List[Dict]] = {}
         for rule in self._rules:
@@ -327,6 +329,11 @@ class PolicyPreflightPolicy(MemoryPreflightPolicy):
             return self._check_field_contains(check_def, context, required, error_msg)
         if check_type == "field_not_contains":
             return self._check_field_not_contains(check_def, context, required, error_msg)
+        if check_type == "field_matches_context":
+            return self._check_field_matches_context(check_def, context, required, error_msg)
+        # Backward-compatible alias (deprecated)
+        if check_type == "field_session_chat_id":
+            return self._check_field_matches_context(check_def, context, required, error_msg)
 
         # ── Memory recall check (backward compatible) ──
         # Covers: memory, memory_recall, identity, method, safety, unknown
@@ -405,6 +412,88 @@ class PolicyPreflightPolicy(MemoryPreflightPolicy):
             required=required, found=not contains, status=status,
             message=error_msg if status != "PASS" else "",
         )
+
+    def _check_field_matches_context(self, check_def: Dict, context: Dict,
+                                      required: bool, error_msg: str) -> PreflightCheck:
+        """Validate that a tool argument matches a value from execution context.
+
+        Generic recipient-binding check. Compares tool_args[field] against
+        execution_context resolved via context_path (dot-notation).
+
+        Config:
+          - field: tool arg field to check (e.g. "chat_id", "email", "recipient_id")
+          - context_path: dot-path into execution_context (e.g. "user.chat_id", "job.intended_recipient.id")
+          - on_missing_context: "fail" (default) | "warn" | "pass"
+          - on_missing_field: "fail" | "warn" | "pass" (default: "pass" — field_required handles this)
+        """
+        field = check_def.get("field", "chat_id")
+        context_path = check_def.get("context_path", "user.chat_id")
+        on_missing_context = check_def.get("on_missing_context", "fail")
+        on_missing_field = check_def.get("on_missing_field", "pass")
+
+        tool_value = self._resolve_field(context, field)
+        expected_value = self._resolve_path(self._execution_context, context_path)
+
+        # No context available — apply on_missing_context policy
+        if expected_value is None:
+            if on_missing_context == "fail" and required:
+                return PreflightCheck(
+                    check_type="field_matches_context",
+                    query=f"{field}=context.{context_path}",
+                    required=required, found=False, status="FAIL",
+                    message=error_msg or f"Required context '{context_path}' is missing",
+                )
+            return PreflightCheck(
+                check_type="field_matches_context",
+                query=f"{field}=context.{context_path}",
+                required=required, found=False, status="PASS",
+                message=f"Context '{context_path}' not available, skipping",
+            )
+
+        # No tool field — delegate to field_required
+        if tool_value is None:
+            status = "FAIL" if on_missing_field == "fail" and required else "PASS"
+            return PreflightCheck(
+                check_type="field_matches_context",
+                query=f"{field}=context.{context_path}",
+                required=required, found=False, status=status,
+                message=error_msg if status != "PASS" else "",
+            )
+
+        # Core comparison
+        match = str(tool_value) == str(expected_value)
+        status = "PASS" if match else ("FAIL" if required else "WARN")
+        masked_tool = self._mask_value(str(tool_value))
+        masked_expected = self._mask_value(str(expected_value))
+        return PreflightCheck(
+            check_type="field_matches_context",
+            query=f"{field}={masked_tool} vs ctx.{context_path}={masked_expected}",
+            required=required, found=match, status=status,
+            message=error_msg if status != "PASS" else "",
+        )
+
+    @staticmethod
+    def _resolve_path(data: Dict[str, Any], path: str) -> Any:
+        """Resolve a dot-separated path from a nested dict.
+
+        Examples:
+            _resolve_path({"user": {"chat_id": "123"}}, "user.chat_id") → "123"
+            _resolve_path({"job": {"recipient": {"id": "456"}}}, "job.recipient.id") → "456"
+            _resolve_path({}, "user.chat_id") → None
+        """
+        current = data
+        for part in path.split("."):
+            if not isinstance(current, dict) or part not in current:
+                return None
+            current = current[part]
+        return current
+
+    @staticmethod
+    def _mask_value(value: str) -> str:
+        """Mask a value for safe logging. Shows last 4 chars."""
+        if len(value) <= 4:
+            return "****"
+        return f"***{value[-4:]}"
 
     def _check_memory_recall(self, check_def: Dict, context: Dict,
                               required: bool, error_msg: str,
@@ -595,6 +684,7 @@ def build_preflight_policy(user_context: Optional[Dict] = None) -> MemoryPreflig
     """Build MemoryPreflightPolicy from policy config.
 
     With user_context, uses per-user bank_id for memory recall checks.
+    Also builds execution_context for field_matches_context checks.
     """
     policy = load_policy(user_context=user_context)
     preflight_cfg = policy.get("preflight", {})
@@ -603,7 +693,19 @@ def build_preflight_policy(user_context: Optional[Dict] = None) -> MemoryPreflig
     rules = preflight_cfg.get("rules", [])
     api = preflight_cfg.get("hindsight_api", "http://localhost:9177")
     bank = _resolve_bank_id(user_context) or preflight_cfg.get("bank_id", "hindsight")
-    return PolicyPreflightPolicy(rules=rules, hindsight_api=api, bank_id=bank)
+    # Build execution_context from user_context for recipient binding checks
+    execution_context: Dict[str, Any] = {}
+    if user_context:
+        if user_context.get("user_id"):
+            execution_context.setdefault("user", {})["id"] = str(user_context["user_id"])
+        if user_context.get("chat_id"):
+            execution_context.setdefault("user", {})["chat_id"] = str(user_context["chat_id"])
+        if user_context.get("channel"):
+            execution_context.setdefault("session", {})["channel"] = str(user_context["channel"])
+    return PolicyPreflightPolicy(
+        rules=rules, hindsight_api=api, bank_id=bank,
+        execution_context=execution_context,
+    )
 
 
 # ─── Task Routing / Strategy Recall ──────────────────────────────────

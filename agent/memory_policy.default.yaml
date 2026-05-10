@@ -38,6 +38,8 @@ query_expansion:
 #    - field_not_equals:    field must NOT equal a specific value
 #    - field_contains:      field must contain a substring
 #    - field_not_contains:  field must NOT contain a substring
+#    - field_matches_context: field must match a value from execution context
+#      Options: field, context_path (dot-notation), on_missing_context (fail|warn|pass)
 #
 # 2. Memory recall checks (search hindsight for related memories):
 #    - memory_recall / identity / method / safety
@@ -74,6 +76,13 @@ preflight:
   #     trigger_patterns: ["file", "document"]
   #     block_on_failure: true
   #     checks:
+  #       # Identity: recipient must match execution context (prevents cross-user send)
+  #       - type: field_matches_context
+  #         field: chat_id
+  #         context_path: user.chat_id
+  #         required: true
+  #         on_missing_context: fail
+  #         error: "recipient does not match the current execution context"
   #       # Structured: recipient field must exist
   #       - type: field_required
   #         field: recipient
