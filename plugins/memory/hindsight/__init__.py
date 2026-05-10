@@ -1452,8 +1452,8 @@ class HindsightMemoryProvider(MemoryProvider):
                     )},
                 ],
                 temperature=0.0,
-                max_tokens=50,
-                timeout=5,
+                max_tokens=114514,
+                timeout=30,
             )
 
             content = response.choices[0].message.content.strip()
