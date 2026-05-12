@@ -10039,13 +10039,31 @@ class AIAgent:
 
             block_result = None
             blocked_by_guardrail = False
+
+            # Memory Preflight Gate: verify relevant memories for high-risk ops.
+            # Same logic as sequential path (lines 10414-10429).
             try:
-                from hermes_cli.plugins import get_pre_tool_call_block_message
-                block_message = get_pre_tool_call_block_message(
-                    function_name, function_args, task_id=effective_task_id or "",
-                )
+                from agent.memory_metacognition import build_preflight_policy
+                _pf_uc = {"user_id": self._user_id, "chat_id": self._chat_id} if self._user_id else None
+                _pf_policy = build_preflight_policy(user_context=_pf_uc)
+                _task_type = _pf_policy.get_task_type(function_name, function_args)
+                if _task_type:
+                    _ctx = {k: str(v)[:100] for k, v in function_args.items()}
+                    _pf = _pf_policy.run_checks(_task_type, _ctx)
+                    if _pf.decision == "block":
+                        _errors = [c.message for c in _pf.checks if c.status == "FAIL" and c.message]
+                        block_result = json.dumps({"error": f"MEMORY PREFLIGHT BLOCKED: {chr(10).join(_errors)}"}, ensure_ascii=False)
             except Exception:
-                block_message = None
+                pass  # Non-blocking
+
+            if block_result is None:
+                try:
+                    from hermes_cli.plugins import get_pre_tool_call_block_message
+                    block_message = get_pre_tool_call_block_message(
+                        function_name, function_args, task_id=effective_task_id or "",
+                    )
+                except Exception:
+                    block_message = None
 
             if block_message is not None:
                 block_result = json.dumps({"error": block_message}, ensure_ascii=False)
@@ -11430,6 +11448,21 @@ class AIAgent:
             except Exception:
                 pass
 
+        # ── Conversation Recall: entity-based hindsight search ──
+        # Extracts key entities from user message and searches hindsight for each.
+        # Catches memories that raw-message prefetch might miss (e.g., "蓝牙键盘"
+        # entity matches "罗技K380蓝牙键盘" memory).
+        _conv_recall_cache = ""
+        try:
+            from agent.memory_metacognition import build_conversation_recall
+            _cr_uc = {"user_id": self._user_id, "chat_id": self._chat_id} if self._user_id else None
+            _conv_recall = build_conversation_recall(user_context=_cr_uc)
+            _conv_recall_cache = _conv_recall.check(
+                original_user_message if isinstance(original_user_message, str) else ""
+            ) or ""
+        except Exception:
+            pass
+
         # ── Task Routing Preflight: inject strategy hint before planning ──
         # Searches hindsight for known strategies (e.g., "linux.do needs Camoufox")
         # and injects the hint so the model plans with prior knowledge, not after failure.
@@ -11613,6 +11646,8 @@ class AIAgent:
                         _fenced = build_memory_context_block(_ext_prefetch_cache)
                         if _fenced:
                             _injections.append(_fenced)
+                    if _conv_recall_cache:
+                        _injections.append(_conv_recall_cache)
                     if _plugin_user_context:
                         _injections.append(_plugin_user_context)
                     if _injections:

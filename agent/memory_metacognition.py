@@ -1099,3 +1099,215 @@ def apply_suggestion(suggestion: LessonSuggestion,
             "errors": [str(e)],
             "dry_run": False,
         }
+
+
+# ─── Conversation Recall (Layer 7) ──────────────────────────────────
+# Lightweight entity extraction + hindsight search for casual conversation.
+# Unlike prefetch (which runs once with the raw user message), this extracts
+# key entities and searches for each one individually, catching memories that
+# the raw message query might miss.
+
+import re as _re
+
+# Common stop words to filter out
+_CJK_STOPWORDS = frozenset({
+    "的", "是", "在", "了", "和", "与", "或", "不", "要", "会", "能", "可以",
+    "我", "你", "他", "她", "它", "我们", "你们", "他们", "这", "那", "这个",
+    "那个", "什么", "怎么", "为什么", "吗", "呢", "吧", "啊", "呀", "哦",
+    "把", "被", "给", "从", "到", "对", "就", "都", "也", "还", "又", "再",
+    "很", "太", "最", "更", "比较", "非常", "特别", "已经", "正在", "将",
+    "有", "没有", "做", "弄", "搞", "说", "讲", "看", "想", "知道", "觉得",
+    "请问", "帮我", "帮", "一下", "下", "下", "看看", "想", "想要",
+})
+
+_EN_STOPWORDS = frozenset({
+    "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
+    "have", "has", "had", "do", "does", "did", "will", "would", "could",
+    "should", "may", "might", "can", "shall", "must", "need",
+    "i", "you", "he", "she", "it", "we", "they", "me", "him", "her", "us",
+    "them", "my", "your", "his", "its", "our", "their", "mine", "yours",
+    "this", "that", "these", "those", "here", "there", "what", "which",
+    "who", "whom", "when", "where", "why", "how", "if", "then", "else",
+    "and", "or", "but", "not", "no", "nor", "so", "yet", "for", "of",
+    "in", "on", "at", "to", "from", "by", "with", "as", "into", "about",
+    "up", "out", "off", "over", "under", "again", "further", "than",
+    "very", "just", "also", "too", "only", "once", "more", "some", "any",
+    "each", "every", "all", "both", "few", "most", "other", "such",
+    "do", "did", "does", "done", "doing", "please", "thanks", "thank",
+})
+
+
+def _extract_entities(text: str, max_entities: int = 8) -> List[str]:
+    """Extract key entities/topics from text using lightweight heuristics.
+
+    No LLM calls — uses regex patterns to identify:
+    - CJK words (2+ chars, filtered by stopword list)
+    - English words (3+ chars, filtered by stopword list)
+    - Quoted strings (high-value signals)
+    - URLs and domain names
+    - Numbers with context (e.g., "K380", "2026")
+    """
+    if not text:
+        return []
+
+    entities = []
+    seen = set()
+
+    # 1. Quoted strings (highest priority)
+    for match in _re.findall(r'[""\'「『](.*?)[""\'」』]', text):
+        clean = match.strip()
+        if clean and clean not in seen and len(clean) >= 2:
+            entities.append(clean)
+            seen.add(clean)
+
+    # 2. URLs and domains
+    for match in _re.findall(r'https?://[^\s]+', text):
+        # Extract domain as entity
+        domain = _re.search(r'https?://([^/]+)', match)
+        if domain:
+            d = domain.group(1).replace('www.', '')
+            if d not in seen:
+                entities.append(d)
+                seen.add(d)
+
+    # 3. Mixed alphanumeric tokens (e.g., "K380", "iPad", "PM2", "PR #22516")
+    for match in _re.findall(r'[A-Za-z]{1,5}[\d]+[\w]*|[\d]+[A-Za-z]+[\w]*', text):
+        if match not in seen and len(match) >= 2:
+            entities.append(match)
+            seen.add(match)
+
+    # 4. CJK words (2-4 chars for nouns, plus longer phrases)
+    # For Chinese without a word segmenter, extract:
+    # - 2-char sequences (most common Chinese word length: 蓝牙, 键盘, 场景)
+    # - 3-char sequences (compound words: 使用场, etc.)
+    # - 4-char sequences (idioms, compound nouns)
+    # This gives hindsight better keyword-level matches.
+    cjk_segments = _re.findall(r'[\u4e00-\u9fff]+', text)
+    for seg in cjk_segments:
+        # Extract 2-char windows (highest signal for search)
+        if len(seg) >= 2:
+            for i in range(len(seg) - 1):
+                w2 = seg[i:i+2]
+                if w2 not in _CJK_STOPWORDS and w2 not in seen:
+                    entities.append(w2)
+                    seen.add(w2)
+        # Extract 3-char windows
+        if len(seg) >= 3:
+            for i in range(len(seg) - 2):
+                w3 = seg[i:i+3]
+                if w3 not in _CJK_STOPWORDS and w3 not in seen:
+                    entities.append(w3)
+                    seen.add(w3)
+        # Extract 4-char windows
+        if len(seg) >= 4:
+            for i in range(len(seg) - 3):
+                w4 = seg[i:i+4]
+                if w4 not in _CJK_STOPWORDS and w4 not in seen:
+                    entities.append(w4)
+                    seen.add(w4)
+
+    # 5. English words (3+ characters)
+    for match in _re.findall(r'[A-Za-z]{3,}', text):
+        lower = match.lower()
+        if lower not in _EN_STOPWORDS and lower not in seen:
+            entities.append(lower)
+            seen.add(lower)
+
+    return entities[:max_entities]
+
+
+class ConversationRecall:
+    """Conversation-level memory recall — Layer 7.
+
+    Extracts entities from user messages and searches hindsight for each,
+    catching memories that raw-message prefetch might miss.
+
+    Example: user says "你买蓝牙键盘"
+    - Entities extracted: ["蓝牙键盘", "键盘"]
+    - Hindsight finds: "左灏购买了罗技K380蓝牙键盘"
+    - Injected into context for the model
+    """
+
+    def __init__(self, hindsight_api: str = "http://localhost:9177",
+                 bank_id: str = "hindsight",
+                 budget: str = "low",
+                 max_tokens: int = 256,
+                 max_entities: int = 5,
+                 timeout: int = 8):
+        self._hindsight_api = hindsight_api
+        self._bank_id = bank_id
+        self._budget = budget
+        self._max_tokens = max_tokens
+        self._max_entities = max_entities
+        self._timeout = timeout
+
+    def check(self, user_message: str) -> str:
+        """Extract entities from user message and search hindsight.
+
+        Returns combined memory context string, or empty if nothing found.
+        """
+        if not user_message or len(user_message) < 3:
+            return ""
+
+        entities = _extract_entities(user_message, self._max_entities)
+        if not entities:
+            return ""
+
+        # Deduplicate and search
+        seen_texts = set()
+        results = []
+
+        for entity in entities:
+            try:
+                hits = self._recall(entity)
+                for hit in hits[:1]:  # Top 1 per entity
+                    text = hit.get("text", "")[:200]
+                    if text and text not in seen_texts:
+                        seen_texts.add(text)
+                        results.append(f"[{entity}] {text}")
+            except Exception:
+                pass
+
+        if not results:
+            return ""
+
+        header = "## Conversation Recall (auto-searched by entity extraction)"
+        return f"{header}\n" + "\n".join(f"- {r}" for r in results[:6])
+
+    def _recall(self, query: str) -> List[Dict]:
+        """Search hindsight for a single query."""
+        import json
+        import urllib.request
+        url = f"{self._hindsight_api}/v1/default/banks/{self._bank_id}/memories/recall"
+        data = json.dumps({
+            "query": query,
+            "budget": self._budget,
+            "max_tokens": self._max_tokens,
+        }).encode()
+        req = urllib.request.Request(url, data=data, method="POST")
+        req.add_header("Content-Type", "application/json")
+        with urllib.request.urlopen(req, timeout=self._timeout) as resp:
+            result = json.loads(resp.read())
+            return result.get("results", result.get("memories", []))
+
+
+def build_conversation_recall(user_context: Optional[Dict] = None) -> ConversationRecall:
+    """Build ConversationRecall from policy config."""
+    policy = load_policy(user_context=user_context)
+    cfg = policy.get("conversation_recall", {})
+    if not cfg.get("enabled", False):
+        return ConversationRecall()  # Returns empty on check() since no API configured
+
+    api = cfg.get("hindsight_api",
+                  policy.get("preflight", {}).get("hindsight_api", "http://localhost:9177"))
+    bank = _resolve_bank_id(user_context) or cfg.get("bank_id",
+                  policy.get("preflight", {}).get("bank_id", "hindsight"))
+
+    return ConversationRecall(
+        hindsight_api=api,
+        bank_id=bank,
+        budget=cfg.get("budget", "low"),
+        max_tokens=cfg.get("max_tokens", 256),
+        max_entities=cfg.get("max_entities", 5),
+        timeout=cfg.get("timeout", 8),
+    )

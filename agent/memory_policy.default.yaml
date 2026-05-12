@@ -62,6 +62,20 @@ routing_preflight:
   #     avoid_methods: ["curl"]
   #     strategy_hint: "Use browser for example.com"
 
+# ─── Conversation Recall (Layer 7) ──────────────────────────────
+# Entity-based hindsight search for casual conversation.
+# Extracts key entities from user messages and searches hindsight for each,
+# catching memories that raw-message prefetch might miss.
+# No LLM calls — uses regex-based entity extraction (zero extra cost).
+conversation_recall:
+  enabled: false
+  # hindsight_api: http://localhost:9177   (default)
+  # bank_id: hindsight                     (default)
+  # budget: low                            (low/mid/high)
+  # max_tokens: 256                        (per entity search)
+  # max_entities: 5                        (max entities to extract)
+  # timeout: 8                             (seconds per search)
+
 preflight:
   enabled: false
   # hindsight_api: http://localhost:9177
