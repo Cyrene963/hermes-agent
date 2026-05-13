@@ -5272,6 +5272,51 @@ class AIAgent:
 
 
 
+    def _build_working_memory_anchor(self, messages: list, api_call_count: int) -> str:
+        """Build a compact working memory anchor for per-turn injection.
+        
+        Inspired by GenericAgent's 'update_working_checkpoint' — extracts key
+        facts from the conversation to maintain context in long sessions.
+        
+        Returns a short string (<500 chars) or empty if nothing useful.
+        """
+        if api_call_count < 2:
+            return ""  # Too early, nothing to anchor
+        
+        # Extract key facts from recent tool results
+        key_facts = []
+        for msg in messages[-6:]:  # Last 6 messages
+            if msg.get("role") != "tool":
+                continue
+            content = msg.get("content", "")
+            if not isinstance(content, str) or len(content) < 20:
+                continue
+            # Extract: file paths, URLs, error messages, key values
+            import re
+            # File paths
+            paths = re.findall(r'(?:/[\w./-]+\.\w+)', content)
+            for p in paths[:2]:
+                if p not in key_facts:
+                    key_facts.append(p)
+            # URLs
+            urls = re.findall(r'https?://\S+', content)
+            for u in urls[:1]:
+                if u not in key_facts:
+                    key_facts.append(u[:80])
+            # Error patterns
+            errors = re.findall(r'(?:Error|Exception|FAILED|error:)(.{0,50})', content)
+            for e in errors[:1]:
+                fact = f"err:{e.strip()[:40]}"
+                if fact not in key_facts:
+                    key_facts.append(fact)
+        
+        if not key_facts:
+            return ""
+        
+        # Compact format
+        facts_str = " | ".join(key_facts[:5])
+        return f"[Working Memory: {facts_str}]"
+
     def _build_system_prompt(self, system_message: str = None) -> str:
         """
         Assemble the full system prompt from all layers.
@@ -11685,6 +11730,10 @@ class AIAgent:
                 # never mutated, so nothing leaks into session persistence.
                 if idx == current_turn_user_idx and msg.get("role") == "user":
                     _injections = []
+                    # Working memory anchor (GenericAgent pattern)
+                    _wm = self._build_working_memory_anchor(messages, api_call_count)
+                    if _wm:
+                        _injections.append(_wm)
                     if _ext_prefetch_cache:
                         _fenced = build_memory_context_block(_ext_prefetch_cache)
                         if _fenced:
