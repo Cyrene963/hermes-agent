@@ -486,6 +486,8 @@ def create_job(
     repeat: Optional[int] = None,
     deliver: Optional[str] = None,
     origin: Optional[Dict[str, Any]] = None,
+    user_id: Optional[str] = None,
+    user_platform: Optional[str] = None,
     skill: Optional[str] = None,
     skills: Optional[List[str]] = None,
     model: Optional[str] = None,
@@ -508,6 +510,9 @@ def create_job(
         repeat: How many times to run (None = forever, 1 = once)
         deliver: Where to deliver output ("origin", "local", "telegram", etc.)
         origin: Source info where job was created (for "origin" delivery)
+        user_id: Owner's platform user ID. Used as fallback for "origin" delivery
+                 when origin dict is missing — on Telegram, user_id IS the chat_id.
+        user_platform: Platform name of the owner (e.g. "telegram").
         skill: Optional legacy single skill name to load before running the prompt
         skills: Optional ordered list of skills to load before running the prompt
         model: Optional per-job model override
@@ -625,6 +630,8 @@ def create_job(
         # Delivery configuration
         "deliver": deliver,
         "origin": origin,  # Tracks where job was created for "origin" delivery
+        "user_id": str(user_id).strip() if user_id else None,
+        "user_platform": str(user_platform).strip() if user_platform else None,
         "enabled_toolsets": normalized_toolsets,
         "workdir": normalized_workdir,
     }

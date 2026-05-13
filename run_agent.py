@@ -10446,6 +10446,20 @@ class AIAgent:
             except Exception:
                 pass  # Non-blocking
 
+            # Disclosure Router Interceptor: block known failure patterns.
+            # Inspired by Nocturne Memory (https://github.com/Dataojitori/nocturne_memory).
+            # Catches tool calls that have consistently failed before and
+            # redirects to the known-working alternative.
+            if _block_msg is None:
+                try:
+                    from agent.disclosure_router import DisclosureRouter
+                    _dr = DisclosureRouter()
+                    _dr_block = _dr.check_tool_call(function_name, function_args)
+                    if _dr_block:
+                        _block_msg = _dr_block
+                except Exception:
+                    pass  # Non-blocking
+
             try:
                 from hermes_cli.plugins import get_pre_tool_call_block_message
                 _block_msg = _block_msg or get_pre_tool_call_block_message(
@@ -11462,6 +11476,29 @@ class AIAgent:
             ) or ""
         except Exception:
             pass
+
+        # ── Disclosure Routing: proactive memory injection via trigger patterns ──
+        # Inspired by Nocturne Memory (https://github.com/Dataojitori/nocturne_memory)
+        # Matches user message against disclosure rules (keyword patterns) and
+        # auto-recalls relevant memories. Solves "agent doesn't remember what it
+        # knows" by removing the dependency on agent-initiated search.
+        try:
+            from agent.disclosure_router import DisclosureRouter
+            _dr_client = None
+            if self._memory_manager:
+                for _p in self._memory_manager.providers:
+                    if hasattr(_p, 'client'):
+                        _dr_client = _p.client
+                        break
+            _dr_bank = f"hindsight-{self._user_id}" if self._user_id else "hindsight"
+            _router = DisclosureRouter(client=_dr_client, bank_id=_dr_bank)
+            _dr_block = _router.check(
+                original_user_message if isinstance(original_user_message, str) else ""
+            )
+            if _dr_block:
+                messages.append({"role": "system", "content": _dr_block})
+        except Exception:
+            pass  # Non-blocking
 
         # ── Task Routing Preflight: inject strategy hint before planning ──
         # Searches hindsight for known strategies (e.g., "linux.do needs Camoufox")

@@ -221,6 +221,31 @@ class MemoryStore:
             return self.user_char_limit
         return self.memory_char_limit
 
+    def _snapshot_version(self, target: str, old_content: str, new_content: str):
+        """Version control: log memory replacements to a JSONL file.
+
+        Inspired by Nocturne Memory's snapshot/rollback mechanism
+        (https://github.com/Dataojitori/nocturne_memory). Each replacement
+        is logged with timestamp, target, old content, and new content,
+        enabling rollback and audit.
+        """
+        import json
+        from datetime import datetime, timezone
+        try:
+            snapshots_dir = self.memory_dir / "snapshots"
+            snapshots_dir.mkdir(parents=True, exist_ok=True)
+            snapshot_file = snapshots_dir / f"{target}_versions.jsonl"
+            entry = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "target": target,
+                "old_content": old_content[:2000],  # Truncate for storage
+                "new_content": new_content[:2000],
+            }
+            with open(snapshot_file, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        except Exception as e:
+            logger.debug("Version snapshot failed: %s", e)
+
     def add(self, target: str, content: str) -> Dict[str, Any]:
         """Append a new entry. Returns error if it would exceed the char limit."""
         content = content.strip()
@@ -319,6 +344,11 @@ class MemoryStore:
                 }
 
             entries[idx] = new_content
+            # Version control: snapshot old content before saving
+            try:
+                self._snapshot_version(target, old_content=matches[0][1], new_content=new_content)
+            except Exception:
+                pass  # Non-blocking
             self._set_entries(target, entries)
             self.save_to_disk(target)
 

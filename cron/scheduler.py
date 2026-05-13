@@ -270,13 +270,56 @@ def _resolve_single_delivery_target(job: dict, deliver_value: str) -> Optional[d
                 "chat_id": str(origin["chat_id"]),
                 "thread_id": origin.get("thread_id"),
             }
-        # Origin missing (e.g. job created via API/script) — try each
-        # platform's home channel as a fallback instead of silently dropping.
+        # Origin missing (e.g. job created via API/script).
+        # Step 1: If the job has a user_id (captured from session), use it
+        # to route to the correct user's home channel instead of the global
+        # default.  On Telegram, user_id IS the chat_id (DM model).
+        user_id = job.get("user_id")
+        user_platform = job.get("user_platform")
+        if user_id:
+            # If we know the user's platform, try it first.
+            if user_platform and user_platform in _HOME_TARGET_ENV_VARS:
+                logger.info(
+                    "Job '%s' deliver=origin resolved via user_id=%s on %s (session platform)",
+                    job.get("name", job.get("id", "?")), user_id, user_platform,
+                )
+                return {
+                    "platform": user_platform,
+                    "chat_id": str(user_id),
+                    "thread_id": None,
+                }
+            # Walk platforms to find one where the user_id matches the
+            # configured home channel — that platform owns this user.
+            for platform_name in _iter_home_target_platforms():
+                home_chat = _get_home_target_chat_id(platform_name)
+                if home_chat and str(home_chat) == str(user_id):
+                    logger.info(
+                        "Job '%s' deliver=origin resolved via user_id=%s on %s (home match)",
+                        job.get("name", job.get("id", "?")), user_id, platform_name,
+                    )
+                    return {
+                        "platform": platform_name,
+                        "chat_id": str(user_id),
+                        "thread_id": _get_home_target_thread_id(platform_name),
+                    }
+            # user_id doesn't match any configured home channel.
+            # Use it as chat_id on the first platform that accepts cron delivery.
+            for platform_name in _iter_home_target_platforms():
+                logger.info(
+                    "Job '%s' deliver=origin: user_id=%s used as chat_id on %s (fallback)",
+                    job.get("name", job.get("id", "?")), user_id, platform_name,
+                )
+                return {
+                    "platform": platform_name,
+                    "chat_id": str(user_id),
+                    "thread_id": None,
+                }
+        # Step 2: No user_id either — fall back to global home channel.
         for platform_name in _iter_home_target_platforms():
             chat_id = _get_home_target_chat_id(platform_name)
             if chat_id:
                 logger.info(
-                    "Job '%s' has deliver=origin but no origin; falling back to %s home channel",
+                    "Job '%s' has deliver=origin but no origin/user_id; falling back to %s home channel",
                     job.get("name", job.get("id", "?")),
                     platform_name,
                 )

@@ -88,6 +88,58 @@ def _origin_from_env() -> Optional[Dict[str, str]]:
     return None
 
 
+def _user_id_from_env() -> Optional[str]:
+    """Capture the creating user's platform ID from session env.
+
+    Used for multi-user delivery fallback: when a cron job has deliver="origin"
+    but no origin dict (created via API/script), the user_id is used to route
+    delivery to the correct user's home channel instead of the global default.
+    """
+    from gateway.session_context import get_session_env
+    return get_session_env("HERMES_SESSION_USER_ID") or None
+
+
+def _user_platform_from_env() -> Optional[str]:
+    """Capture the creating user's platform name from session env."""
+    from gateway.session_context import get_session_env
+    return get_session_env("HERMES_SESSION_PLATFORM") or None
+
+
+def _resolve_known_user(name_hint: str) -> Optional[Dict[str, str]]:
+    """Resolve a user name/hint to a delivery target.
+
+    Checks the Telegram approved-users pairing file for known users.
+    Returns {"platform": "telegram", "chat_id": "..."} or None.
+
+    Used when the agent creates a cron job for another user — e.g.
+    "create a homework reminder for Steven" — and needs to set deliver
+    to the correct chat_id instead of the session owner's.
+    """
+    import json as _json
+    from pathlib import Path
+
+    hint = name_hint.strip().lower()
+    if not hint:
+        return None
+
+    pairing_file = Path.home() / ".hermes" / "pairing" / "telegram-approved.json"
+    if not pairing_file.exists():
+        return None
+
+    try:
+        data = _json.loads(pairing_file.read_text())
+    except Exception:
+        return None
+
+    # Match by user_name (case-insensitive substring)
+    for chat_id, info in data.items():
+        user_name = str(info.get("user_name", "")).lower()
+        if hint in user_name or user_name in hint:
+            return {"platform": "telegram", "chat_id": str(chat_id)}
+
+    return None
+
+
 def _repeat_display(job: Dict[str, Any]) -> str:
     times = (job.get("repeat") or {}).get("times")
     completed = (job.get("repeat") or {}).get("completed", 0)
@@ -264,6 +316,7 @@ def cronjob(
     name: Optional[str] = None,
     repeat: Optional[int] = None,
     deliver: Optional[str] = None,
+    target_user: Optional[str] = None,
     include_disabled: bool = False,
     skill: Optional[str] = None,
     skills: Optional[List[str]] = None,
@@ -327,13 +380,26 @@ def cronjob(
                             success=False,
                         )
 
+            # Resolve target_user to a deliver target if set
+            resolved_deliver = _normalize_deliver_param(deliver)
+            if target_user and not deliver:
+                resolved = _resolve_known_user(target_user)
+                if resolved:
+                    resolved_deliver = f"{resolved['platform']}:{resolved['chat_id']}"
+                    logger.info(
+                        "Resolved target_user='%s' to deliver='%s'",
+                        target_user, resolved_deliver,
+                    )
+
             job = create_job(
                 prompt=prompt or "",
                 schedule=schedule,
                 name=name,
                 repeat=repeat,
-                deliver=_normalize_deliver_param(deliver),
+                deliver=resolved_deliver,
                 origin=_origin_from_env(),
+                user_id=_user_id_from_env(),
+                user_platform=_user_platform_from_env(),
                 skills=canonical_skills,
                 model=_normalize_optional_job_value(model),
                 provider=_normalize_optional_job_value(provider),
@@ -543,7 +609,11 @@ Important safety rule: cron-run sessions should not recursively schedule more cr
             },
             "deliver": {
                 "type": "string",
-                "description": "Omit this parameter to auto-deliver back to the current chat and topic (recommended). Auto-detection preserves thread/topic context. Only set explicitly when the user asks to deliver somewhere OTHER than the current conversation. Values: 'origin' (same as omitting), 'local' (no delivery, save only), 'all' (fan out to every connected home channel), or platform:chat_id:thread_id for a specific destination. Combine with comma: 'origin,all' delivers to the origin plus every other connected channel. Examples: 'telegram:-1001234567890:17585', 'discord:#engineering', 'sms:+15551234567', 'all'. WARNING: 'platform:chat_id' without :thread_id loses topic targeting. 'all' resolves at fire time, so a job created before a channel was wired up will pick it up automatically once connected."
+                "description": "Omit this parameter to auto-deliver back to the current chat and topic (recommended). Auto-detection preserves thread/topic context. Only set explicitly when the user asks to deliver somewhere OTHER than the current conversation. Values: 'origin' (same as omitting), 'local' (no delivery, save only), 'all' (fan out to every connected home channel), or platform:chat_id:thread_id for a specific destination. Combine with comma: 'origin,all' delivers to the origin plus every other connected channel. Examples: 'telegram:-1001234567890:17585', 'discord:#engineering', 'sms:+155****4567', 'all'. WARNING: 'platform:chat_id' without :thread_id loses topic targeting. 'all' resolves at fire time, so a job created before a channel was wired up will pick it up automatically once connected. IMPORTANT: When creating a job for ANOTHER user (not yourself), you MUST set deliver to that user's platform:chat_id (e.g. 'telegram:7910206541' for Steven). Do NOT rely on auto-detection for cross-user jobs."
+            },
+            "target_user": {
+                "type": "string",
+                "description": "Name or hint of the user this job is for (e.g. 'Steven', '姚宗宏'). When set, the system auto-resolves to the correct deliver target. Use this instead of manually constructing deliver strings when creating jobs for other users. Resolved from the Telegram approved-users list."
             },
             "skills": {
                 "type": "array",
