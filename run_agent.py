@@ -11462,26 +11462,12 @@ class AIAgent:
             except Exception:
                 pass
 
-        # ── Conversation Recall: entity-based hindsight search ──
-        # Extracts key entities from user message and searches hindsight for each.
-        # Catches memories that raw-message prefetch might miss (e.g., "蓝牙键盘"
-        # entity matches "罗技K380蓝牙键盘" memory).
-        _conv_recall_cache = ""
-        try:
-            from agent.memory_metacognition import build_conversation_recall
-            _cr_uc = {"user_id": self._user_id, "chat_id": self._chat_id} if self._user_id else None
-            _conv_recall = build_conversation_recall(user_context=_cr_uc)
-            _conv_recall_cache = _conv_recall.check(
-                original_user_message if isinstance(original_user_message, str) else ""
-            ) or ""
-        except Exception:
-            pass
-
         # ── Disclosure Routing: proactive memory injection via trigger patterns ──
         # Inspired by Nocturne Memory (https://github.com/Dataojitori/nocturne_memory)
         # Matches user message against disclosure rules (keyword patterns) and
         # auto-recalls relevant memories. Solves "agent doesn't remember what it
         # knows" by removing the dependency on agent-initiated search.
+        _dr_matched = False
         try:
             from agent.disclosure_router import DisclosureRouter
             _dr_client = None
@@ -11497,8 +11483,28 @@ class AIAgent:
             )
             if _dr_block:
                 messages.append({"role": "system", "content": _dr_block})
+                _dr_matched = True
         except Exception:
             pass  # Non-blocking
+
+        # ── Conversation Recall: entity-based hindsight search (fallback) ──
+        # Extracts key entities from user message and searches hindsight for each.
+        # Catches memories that raw-message prefetch might miss (e.g., "蓝牙键盘"
+        # entity matches "罗技K380蓝牙键盘" memory).
+        # SKIPPED when Disclosure Router already matched — the router's pre-configured
+        # queries are higher quality than CJK sliding window entities, and running both
+        # causes duplicate memory injection (up to 14 overlapping results).
+        _conv_recall_cache = ""
+        if not _dr_matched:
+            try:
+                from agent.memory_metacognition import build_conversation_recall
+                _cr_uc = {"user_id": self._user_id, "chat_id": self._chat_id} if self._user_id else None
+                _conv_recall = build_conversation_recall(user_context=_cr_uc)
+                _conv_recall_cache = _conv_recall.check(
+                    original_user_message if isinstance(original_user_message, str) else ""
+                ) or ""
+            except Exception:
+                pass
 
         # ── Task Routing Preflight: inject strategy hint before planning ──
         # Searches hindsight for known strategies (e.g., "linux.do needs Camoufox")
