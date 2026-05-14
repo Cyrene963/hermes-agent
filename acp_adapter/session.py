@@ -288,7 +288,7 @@ class SessionManager:
 
         if db is not None:
             try:
-                for row in db.list_sessions_rich(source="acp", limit=1000):
+                for row in db.list_sessions_rich(source="acp", limit=1000, user_id=None):
                     persisted_rows[str(row["id"])] = dict(row)
             except Exception:
                 logger.debug("Failed to load ACP sessions from DB", exc_info=True)
@@ -377,7 +377,7 @@ class SessionManager:
         db = self._get_db()
         if db is not None:
             try:
-                rows = db.search_sessions(source="acp", limit=10000)
+                rows = db.search_sessions(source="acp", limit=10000, user_id=None)
                 for row in rows:
                     sid = row["id"]
                     _clear_task_cwd(sid)

@@ -609,7 +609,7 @@ async def get_status():
         from hermes_state import SessionDB
         db = SessionDB()
         try:
-            sessions = db.list_sessions_rich(limit=50)
+            sessions = db.list_sessions_rich(limit=50, user_id=None)
             now = time.time()
             active_sessions = sum(
                 1 for s in sessions
@@ -778,7 +778,7 @@ async def get_sessions(limit: int = 20, offset: int = 0):
         from hermes_state import SessionDB
         db = SessionDB()
         try:
-            sessions = db.list_sessions_rich(limit=limit, offset=offset)
+            sessions = db.list_sessions_rich(limit=limit, offset=offset, user_id=None)
             total = db.session_count()
             now = time.time()
             for s in sessions:
@@ -814,7 +814,7 @@ async def search_sessions(q: str = "", limit: int = 20):
                 else:
                     terms.append(token + "*")
             prefix_query = " ".join(terms)
-            matches = db.search_messages(query=prefix_query, limit=limit)
+            matches = db.search_messages(query=prefix_query, limit=limit, user_id=None)
             # Group by session_id — return unique sessions with their best snippet
             seen: dict = {}
             for m in matches:
@@ -2371,7 +2371,7 @@ def _session_latest_descendant(session_id: str):
                     "started_at": row_get(row, "started_at", 2),
                 })
         else:
-            rows = db.list_sessions_rich(limit=10000, offset=0)
+            rows = db.list_sessions_rich(limit=10000, offset=0, user_id=None)
 
         children = {}
         for row in rows:

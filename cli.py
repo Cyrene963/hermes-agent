@@ -5436,6 +5436,7 @@ class HermesCLI:
                 source="cli",
                 exclude_sources=["tool"],
                 limit=limit,
+                user_id=None,
             )
         except Exception:
             return []
