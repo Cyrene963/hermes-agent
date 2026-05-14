@@ -1,0 +1,126 @@
+# Memory Metacognition Policy — Default (bundled with agent)
+#
+# This file ships with the agent and provides CONSERVATIVE defaults:
+# - Memory index: disabled (no extra tokens unless user opts in)
+# - Query expansion: disabled (original message only)
+# - Preflight: disabled (no blocking, no checks)
+#
+# To customize: copy to ~/.hermes/memory_policy.yaml and edit.
+# Local policy overlays this file (local wins on conflicts).
+#
+# All sections are optional. Missing sections = disabled.
+
+# ─── Memory Index ────────────────────────────────────────────────────
+# Injects a compact summary of the memory store into the system prompt.
+# Helps the model know what categories and recent memories exist.
+memory_index:
+  enabled: false
+  # script_dir: ~/.hermes/scripts   (default)
+  # timeout: 5                      (seconds)
+
+# ─── Query Expansion ─────────────────────────────────────────────────
+# Expands user messages into better hindsight search queries.
+# Maps keywords → list of related terms to also search for.
+query_expansion:
+  enabled: false
+  max_queries: 8
+  # expansions:
+  #   "example_keyword": ["related_term1", "related_term2"]
+
+# ─── Preflight Gate ──────────────────────────────────────────────────
+# Gates dangerous operations based on tool arguments and/or memory state.
+#
+# Two categories of checks are supported:
+#
+# 1. Structured argument checks (inspect tool call parameters):
+#    - field_required:      field must exist in tool args
+#    - field_equals:        field must equal a specific value
+#    - field_not_equals:    field must NOT equal a specific value
+#    - field_contains:      field must contain a substring
+#    - field_not_contains:  field must NOT contain a substring
+#
+# 2. Memory recall checks (search hindsight for related memories):
+#    - memory_recall / identity / method / safety
+#    - Searches hindsight for the query string
+#    - PASS if found, FAIL if required and not found
+#
+# Rules can combine both types. block_on_failure: true = hard block.
+
+# ─── Task Routing Preflight (Strategy Recall Gate) ────────────────
+# Runs BEFORE tool selection. Matches user message against known
+# strategies and injects hints so the model plans with prior experience.
+# Output is a hint (not a block) — the model still decides, but with context.
+routing_preflight:
+  enabled: false
+  # rules:
+  #   - task_type: site_access
+  #     trigger_patterns: ["example.com"]
+  #     recall_queries: ["example.com access method"]
+  #     preferred_method: "browser_navigate"
+  #     avoid_methods: ["curl"]
+  #     strategy_hint: "Use browser for example.com"
+
+# ─── Conversation Recall (Layer 7) ──────────────────────────────
+# Entity-based hindsight search for casual conversation.
+# Extracts key entities from user messages and searches hindsight for each,
+# catching memories that raw-message prefetch might miss.
+# No LLM calls — uses regex-based entity extraction (zero extra cost).
+conversation_recall:
+  enabled: false
+  # hindsight_api: http://localhost:9177   (default)
+  # bank_id: hindsight                     (default)
+  # budget: low                            (low/mid/high)
+  # max_tokens: 256                        (per entity search)
+  # max_entities: 5                        (max entities to extract)
+  # timeout: 8                             (seconds per search)
+
+preflight:
+  enabled: false
+  # hindsight_api: http://localhost:9177
+  # bank_id: hindsight
+  # rules: []
+  #
+  # Example rules (disabled by default):
+  # rules:
+  #   # ── File delivery gate ──
+  #   - tool: send_message
+  #     task_type: file_delivery
+  #     trigger_patterns: ["file", "document"]
+  #     block_on_failure: true
+  #     checks:
+  #       # Structured: recipient field must exist
+  #       - type: field_required
+  #         field: recipient
+  #         required: true
+  #         error: "Recipient is required before sending"
+  #       # Structured: method must be the correct one
+  #       - type: field_equals
+  #         field: method
+  #         value: sendDocument
+  #         required: true
+  #         error: "File delivery must use sendDocument"
+  #       # Structured: payload must not contain raw file tags
+  #       - type: field_not_contains
+  #         field: payload
+  #         value: "MEDIA:"
+  #         required: true
+  #         error: "MEDIA tag must not be sent as plain text"
+  #       # Memory: check if we have related experience
+  #       - type: memory_recall
+  #         query: "file delivery sendDocument"
+  #         required: false
+  #         error: "No related memory found"
+  #
+  #   # ── Destructive command gate ──
+  #   - tool: terminal
+  #     task_type: destructive_command
+  #     trigger_patterns:
+  #       - "rm -rf"
+  #       - "git push --force"
+  #       - "git reset --hard"
+  #     block_on_failure: true
+  #     checks:
+  #       - type: memory_recall
+  #         query: "backup safety confirmation"
+  #         required: false
+  #         error: "No backup verification memory found"

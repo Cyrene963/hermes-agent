@@ -161,6 +161,13 @@ from agent.context_compressor import ContextCompressor
 from agent.subdirectory_hints import SubdirectoryHintTracker
 from agent.prompt_caching import apply_anthropic_cache_control
 from agent.prompt_builder import build_skills_system_prompt, build_context_files_prompt, build_environment_hints, load_soul_md, TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS, GOOGLE_MODEL_OPERATIONAL_GUIDANCE, OPENAI_MODEL_EXECUTION_GUIDANCE
+
+# Disclosure Router — proactive memory injection via trigger conditions
+try:
+    from agent.disclosure_router import DisclosureRouter
+    _disclosure_router = DisclosureRouter()
+except Exception:
+    _disclosure_router = None
 from agent.usage_pricing import estimate_usage_cost, normalize_usage
 from agent.codex_responses_adapter import (
     _derive_responses_function_call_id as _codex_derive_responses_function_call_id,
@@ -1970,6 +1977,9 @@ class AIAgent:
         self._memory_nudge_interval = 10
         self._turns_since_memory = 0
         self._iters_since_skill = 0
+        self._deep_work_loaded = False  # Time-budget router
+        self._time_budget_detected = False  # Time-budget router
+        self._skills_loaded_this_session = set()  # Skill Intent Router: track loaded skills
         if not skip_memory:
             try:
                 mem_config = _agent_cfg.get("memory", {})
@@ -6011,6 +6021,16 @@ class AIAgent:
         if skills_prompt:
             stable_parts.append(skills_prompt)
 
+        # P0: Time-budget router — when user signals high time budget, force deep-work
+        if getattr(self, '_time_budget_detected', False) and has_skills_tools:
+            stable_parts.append(
+                "## Mandatory Skill: deep-work\n"
+                "The user has signaled a high time-budget / quality task. "
+                "You MUST load the `deep-work` skill via skill_view(name='deep-work') "
+                "before starting work. This enforces quality gates, time budgets, "
+                "and adversarial review. Do NOT skip this.\n"
+            )
+
         # Alibaba Coding Plan API always returns "glm-4.7" as model name regardless
         # of the requested model. Inject explicit model identity into the system prompt
         # so the agent can correctly report which model it is (workaround for API bug).
@@ -6064,6 +6084,17 @@ class AIAgent:
             if context_files_prompt:
                 context_parts.append(context_files_prompt)
 
+        # Memory Metacognition — inject memory index block for fast reference
+        try:
+            if not hasattr(self, '_memory_index_cached'):
+                from agent.prompt_builder import build_memory_index_block
+                _uc = {"user_id": self._user_id, "chat_id": self._chat_id} if getattr(self, '_user_id', None) else None
+                self._memory_index_cached = build_memory_index_block(user_context=_uc)
+            if self._memory_index_cached:
+                context_parts.append(self._memory_index_cached)
+        except Exception:
+            pass
+
         # ── Volatile tier (changes per session/turn — never cached) ───
         volatile_parts: List[str] = []
 
@@ -6103,6 +6134,50 @@ class AIAgent:
             "context":  "\n\n".join(p.strip() for p in context_parts  if p and p.strip()),
             "volatile": "\n\n".join(p.strip() for p in volatile_parts if p and p.strip()),
         }
+
+    # ── Time-Budget Router (P0: force deep-work for high time-budget tasks) ──
+    _TIME_BUDGET_PATTERNS_ZH = [
+        "给你一天时间", "给你一天", "给你几天", "给你两天",
+        "给你几个小时", "给你一晚上", "给你半天",
+        "给你两小时", "给你三小时", "给你四小时",
+        "给你N小时", "给你时间",
+        "慢慢做", "不着急", "不急", "慢慢来",
+        "深度调研", "深度研究", "深度分析", "深度审计",
+        "全面审计", "全面测试", "全面检查", "全面分析",
+        "彻底检查", "彻底测试", "彻底修复", "彻底调研",
+        "好好研究", "好好测试", "好好检查", "好好调研",
+        "好好深度", "好好优选",
+        "打包成文件", "做成报告", "写个报告",
+        "用一整天", "花一天", "花时间",
+        "全面具体", "认真测", "仔细测",
+    ]
+    _TIME_BUDGET_PATTERNS_EN = [
+        "use the whole night", "take your time", "you have N hours",
+        "use all the time", "spend the day", "no rush",
+        "comprehensive testing", "comprehensive audit",
+        "deep research", "deep dive", "thorough analysis",
+        "thorough testing", "thorough review",
+        "full audit", "full test", "full coverage",
+        "make it perfect", "do it right",
+        "take as long as you need",
+    ]
+
+    def _detect_time_budget(self, user_message: str) -> bool:
+        """Detect if user message signals a high time-budget / quality task.
+
+        When True, deep-work should be loaded as a mandatory skill so the
+        agent enters quality-enforcement mode instead of generic task management.
+        """
+        if not user_message:
+            return False
+        msg_lower = user_message.lower()
+        for p in self._TIME_BUDGET_PATTERNS_ZH:
+            if p in user_message:
+                return True
+        for p in self._TIME_BUDGET_PATTERNS_EN:
+            if p in msg_lower:
+                return True
+        return False
 
     def _build_system_prompt(self, system_message: str = None) -> str:
         """
@@ -10618,13 +10693,27 @@ class AIAgent:
         # Check plugin hooks for a block directive before executing anything.
         block_message: Optional[str] = None
         if not pre_tool_block_checked:
+            # Memory Preflight Gate (concurrent path)
+            try:
+                from agent.memory_metacognition import build_preflight_policy
+                _pf_uc = {"user_id": self._user_id, "chat_id": self._chat_id} if self._user_id else None
+                _pf_policy = build_preflight_policy(user_context=_pf_uc)
+                _task_type = _pf_policy.get_task_type(function_name, function_args)
+                if _task_type:
+                    _ctx = {k: str(v)[:100] for k, v in function_args.items()}
+                    _pf = _pf_policy.run_checks(_task_type, _ctx)
+                    if _pf.decision == "block":
+                        _errors = [c.message for c in _pf.checks if c.status == "FAIL" and c.message]
+                        block_message = f"MEMORY PREFLIGHT BLOCKED: {chr(10).join(_errors)}"
+            except Exception:
+                pass  # Non-blocking
             try:
                 from hermes_cli.plugins import get_pre_tool_call_block_message
-                block_message = get_pre_tool_call_block_message(
+                block_message = block_message or get_pre_tool_call_block_message(
                     function_name, function_args, task_id=effective_task_id or "",
                 )
             except Exception:
-                pass
+                pass  # Keep existing block_message if set by preflight gate
         if block_message is not None:
             return json.dumps({"error": block_message}, ensure_ascii=False)
 
@@ -10781,13 +10870,31 @@ class AIAgent:
 
             block_result = None
             blocked_by_guardrail = False
+
+            # Memory Preflight Gate: verify relevant memories for high-risk ops.
+            # Same logic as sequential path (lines 10414-10429).
             try:
-                from hermes_cli.plugins import get_pre_tool_call_block_message
-                block_message = get_pre_tool_call_block_message(
-                    function_name, function_args, task_id=effective_task_id or "",
-                )
+                from agent.memory_metacognition import build_preflight_policy
+                _pf_uc = {"user_id": self._user_id, "chat_id": self._chat_id} if self._user_id else None
+                _pf_policy = build_preflight_policy(user_context=_pf_uc)
+                _task_type = _pf_policy.get_task_type(function_name, function_args)
+                if _task_type:
+                    _ctx = {k: str(v)[:100] for k, v in function_args.items()}
+                    _pf = _pf_policy.run_checks(_task_type, _ctx)
+                    if _pf.decision == "block":
+                        _errors = [c.message for c in _pf.checks if c.status == "FAIL" and c.message]
+                        block_result = json.dumps({"error": f"MEMORY PREFLIGHT BLOCKED: {chr(10).join(_errors)}"}, ensure_ascii=False)
             except Exception:
-                block_message = None
+                pass  # Non-blocking
+
+            if block_result is None:
+                try:
+                    from hermes_cli.plugins import get_pre_tool_call_block_message
+                    block_message = get_pre_tool_call_block_message(
+                        function_name, function_args, task_id=effective_task_id or "",
+                    )
+                except Exception:
+                    block_message = None
 
             if block_message is not None:
                 block_result = json.dumps({"error": block_message}, ensure_ascii=False)
@@ -11163,13 +11270,31 @@ class AIAgent:
 
             # Check plugin hooks for a block directive before executing.
             _block_msg: Optional[str] = None
+
+            # Memory Preflight Gate: verify relevant memories for high-risk ops.
+            # Policy-driven: rules loaded from memory_policy.yaml.
+            # Default: no-op (all operations allowed).
+            try:
+                from agent.memory_metacognition import build_preflight_policy
+                _pf_uc = {"user_id": self._user_id, "chat_id": self._chat_id} if self._user_id else None
+                _pf_policy = build_preflight_policy(user_context=_pf_uc)
+                _task_type = _pf_policy.get_task_type(function_name, function_args)
+                if _task_type:
+                    _ctx = {k: str(v)[:100] for k, v in function_args.items()}
+                    _pf = _pf_policy.run_checks(_task_type, _ctx)
+                    if _pf.decision == "block":
+                        _errors = [c.message for c in _pf.checks if c.status == "FAIL" and c.message]
+                        _block_msg = f"MEMORY PREFLIGHT BLOCKED: {chr(10).join(_errors)}"
+            except Exception:
+                pass  # Non-blocking
+
             try:
                 from hermes_cli.plugins import get_pre_tool_call_block_message
-                _block_msg = get_pre_tool_call_block_message(
+                _block_msg = _block_msg or get_pre_tool_call_block_message(
                     function_name, function_args, task_id=effective_task_id or "",
                 )
             except Exception:
-                pass
+                pass  # Keep existing _block_msg if set by preflight gate
 
             _guardrail_block_decision: ToolGuardrailDecision | None = None
             if _block_msg is None:
@@ -12021,6 +12146,46 @@ class AIAgent:
         # from disk that the model already knows about (it wrote them!),
         # producing a different system prompt and breaking the Anthropic
         # prefix cache.
+        # P0: Time-budget router — detect high time-budget signals in user message
+        # and force deep-work skill loading. Must happen before system prompt build.
+        if self._detect_time_budget(user_message or ""):
+            self._time_budget_detected = True
+            # Invalidate cached system prompt so it gets rebuilt with deep-work mandate
+            if self._cached_system_prompt is not None:
+                self._cached_system_prompt = None
+
+        # Disclosure Router — proactive memory injection via trigger conditions.
+        # Checks incoming message against stored trigger rules and injects relevant
+        # memories before the agent starts thinking. No LLM cost (keyword matching).
+        _disclosure_injected = ""
+        if _disclosure_router is not None and user_message:
+            try:
+                _disclosure_injected = _disclosure_router.check(user_message) or ""
+            except Exception:
+                pass  # Non-fatal — disclosure is best-effort
+
+        # Memory Metacognition — strategy preflight for task routing hints
+        _strategy_hint = ""
+        try:
+            from agent.memory_metacognition import build_strategy_preflight
+            _sr_uc = {"user_id": self._user_id, "chat_id": self._chat_id} if getattr(self, '_user_id', None) else None
+            _strat = build_strategy_preflight(user_context=_sr_uc)
+            _strategy_hint = _strat.check(user_message or "") or ""
+        except Exception:
+            pass
+
+        # Conversation Recall: entity-based hindsight search
+        # Extracts key entities from user message and searches hindsight for each.
+        # Catches memories that raw-message prefetch might miss.
+        _conv_recall_cache = ""
+        try:
+            from agent.memory_metacognition import build_conversation_recall
+            _cr_uc = {"user_id": self._user_id, "chat_id": self._chat_id} if getattr(self, '_user_id', None) else None
+            _conv_recall = build_conversation_recall(user_context=_cr_uc)
+            _conv_recall_cache = _conv_recall.check(user_message or "") or ""
+        except Exception:
+            pass
+
         if self._cached_system_prompt is None:
             stored_prompt = None
             if conversation_history and self._session_db:
@@ -12061,6 +12226,18 @@ class AIAgent:
                         logger.debug("Session DB update_system_prompt failed: %s", e)
 
         active_system_prompt = self._cached_system_prompt
+
+        # Inject disclosure router results into system prompt if any matched
+        if _disclosure_injected:
+            active_system_prompt = (active_system_prompt or "") + "\n\n" + _disclosure_injected
+
+        # Inject strategy preflight hint if detected
+        if _strategy_hint:
+            active_system_prompt = (active_system_prompt or "") + "\n\n" + _strategy_hint
+
+        # Inject conversation recall results if any entities matched
+        if _conv_recall_cache:
+            active_system_prompt = (active_system_prompt or "") + "\n\n" + _conv_recall_cache
 
         # ── Preflight context compression ──
         # Before entering the main loop, check if the loaded conversation
@@ -12220,7 +12397,26 @@ class AIAgent:
         if self._memory_manager:
             try:
                 _query = original_user_message if isinstance(original_user_message, str) else ""
-                _ext_prefetch_cache = self._memory_manager.prefetch_all(_query) or ""
+                # Auto-Recall Enhancement: expand query with related terms
+                # to improve hindsight recall precision.
+                try:
+                    from agent.prompt_builder import expand_recall_queries
+                    _qe_uc = {"user_id": self._user_id, "chat_id": self._chat_id} if self._user_id else None
+                    _expanded = expand_recall_queries(_query, user_context=_qe_uc)
+                    if len(_expanded) > 1:
+                        # Run prefetch for original + expanded queries, deduplicate
+                        _all_prefetch = []
+                        _seen = set()
+                        for _q in _expanded[:5]:  # Cap at 5 to limit latency
+                            _result = self._memory_manager.prefetch_all(_q) or ""
+                            if _result and _result not in _seen:
+                                _seen.add(_result)
+                                _all_prefetch.append(_result)
+                        _ext_prefetch_cache = "\n".join(_all_prefetch) if _all_prefetch else ""
+                    else:
+                        _ext_prefetch_cache = self._memory_manager.prefetch_all(_query) or ""
+                except Exception:
+                    _ext_prefetch_cache = self._memory_manager.prefetch_all(_query) or ""
             except Exception:
                 pass
 
@@ -12397,6 +12593,8 @@ class AIAgent:
                         _fenced = build_memory_context_block(_ext_prefetch_cache)
                         if _fenced:
                             _injections.append(_fenced)
+                    if _conv_recall_cache:
+                        _injections.append(_conv_recall_cache)
                     if _plugin_user_context:
                         _injections.append(_plugin_user_context)
                     if _injections:

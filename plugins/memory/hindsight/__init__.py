@@ -1425,6 +1425,12 @@ class HindsightMemoryProvider(MemoryProvider):
             logger.debug("sync_turn: skipped (shutting down)")
             return
 
+        # Multi-user isolation: skip Hindsight retain for WeChat (iLink)
+        _disabled_platforms = ('weixin',)
+        if self._platform in _disabled_platforms:
+            logger.debug("sync_turn: skipped (platform %s)", self._platform)
+            return
+
         if session_id:
             self._session_id = str(session_id).strip()
 

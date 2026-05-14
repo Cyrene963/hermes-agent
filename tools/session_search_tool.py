@@ -196,7 +196,8 @@ def _truncate_around_matches(
 
 
 async def _summarize_session(
-    conversation_text: str, query: str, session_meta: Dict[str, Any]
+    conversation_text: str, query: str, session_meta: Dict[str, Any],
+    user_id: str = None,
 ) -> Optional[str]:
     """Summarize a single session conversation focused on the search query."""
     system_prompt = (
@@ -210,6 +211,13 @@ async def _summarize_session(
         "Be thorough but concise. Preserve specific details (commands, paths, error messages) "
         "that would be useful to recall. Write in past tense as a factual recap."
     )
+
+    if user_id:
+        system_prompt += (
+            "\n\nIMPORTANT: This conversation belongs to user " + str(user_id) + ". "
+            "The transcript may mention other people\'s private information. "
+            "Only include information belonging to the conversation owner."
+        )
 
     source = session_meta.get("source", "unknown")
     started = _format_timestamp(session_meta.get("started_at"))
@@ -328,6 +336,7 @@ def session_search(
     limit: int = 3,
     db=None,
     current_session_id: str = None,
+    user_id: str = None,
 ) -> str:
     """
     Search past sessions and return focused summaries of matching conversations.
@@ -359,7 +368,7 @@ def session_search(
     # Recent sessions mode: when query is empty, return metadata for recent sessions.
     # No LLM calls — just DB queries for titles, previews, timestamps.
     if not query or not query.strip():
-        return _list_recent_sessions(db, limit, current_session_id)
+        return _list_recent_sessions(db, limit, current_session_id, user_id=user_id)
 
     query = query.strip()
 
@@ -376,6 +385,7 @@ def session_search(
             exclude_sources=list(_HIDDEN_SESSION_SOURCES),
             limit=50,  # Get more matches to find unique sessions
             offset=0,
+            user_id=user_id,
         )
 
         if not raw_results:
@@ -465,7 +475,7 @@ def session_search(
 
             async def _bounded_summary(text: str, meta: Dict[str, Any]) -> Optional[str]:
                 async with semaphore:
-                    return await _summarize_session(text, query, meta)
+                    return await _summarize_session(text, query, meta, user_id=user_id)
 
             coros = [
                 _bounded_summary(text, meta)
@@ -606,7 +616,8 @@ registry.register(
         role_filter=args.get("role_filter"),
         limit=args.get("limit", 3),
         db=kw.get("db"),
-        current_session_id=kw.get("current_session_id")),
+        current_session_id=kw.get("current_session_id"),
+        user_id=kw.get("user_id")),
     check_fn=check_session_search_requirements,
     emoji="🔍",
 )

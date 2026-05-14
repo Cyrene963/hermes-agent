@@ -51,6 +51,14 @@ SUMMARY_PREFIX = (
 )
 LEGACY_SUMMARY_PREFIX = "[CONTEXT SUMMARY]:"
 
+# Sentinel appended to the system prompt the first time a session is
+# compacted. Detection of this string in messages[0] tells subsequent
+# compactions "this is a re-compaction" — see
+# ``ContextCompressor._is_recompaction``. (issue #17344)
+_COMPRESSION_NOTE_SENTINEL = (
+    "earlier conversation turns have been compacted into a handoff summary"
+)
+
 # Minimum tokens for the summary output
 _MIN_SUMMARY_TOKENS = 2000
 # Proportion of compressed content to allocate for summary
