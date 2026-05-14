@@ -12233,7 +12233,14 @@ class AIAgent:
 
         # Inject strategy preflight hint if detected
         if _strategy_hint:
-            active_system_prompt = (active_system_prompt or "") + "\n\n" + _strategy_hint
+            _hint_text = (
+                f"[Strategy Hint: {_strategy_hint.task_type}]\n"
+                f"Recommended: {_strategy_hint.preferred_method} "
+                f"(confidence: {_strategy_hint.confidence})\n"
+                f"Avoid: {', '.join(_strategy_hint.avoid_methods)}\n"
+                f"Reason: {_strategy_hint.reason}"
+            )
+            active_system_prompt = (active_system_prompt or "") + "\n\n" + _hint_text
 
         # Inject conversation recall results if any entities matched
         if _conv_recall_cache:
