@@ -31,57 +31,10 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-# Default disclosure rules embedded as fallback
-_DEFAULT_RULES = [
-    {
-        "name": "linuxdo",
-        "patterns": ["linux.do", "linuxdo", "LinuxDo"],
-        "query": "linuxdo cloudflare camoufox bypass cookie",
-        "priority": 10,
-    },
-    {
-        "name": "hermes-agent-dev",
-        "patterns": ["hermes agent", "hermes-agent", "gateway", "补丁", "patch", "hermes update"],
-        "query": "hermes agent patch gateway update branch",
-        "priority": 8,
-    },
-    {
-        "name": "beibei-project",
-        "patterns": ["beibei", "不背不背", "题库", "DSE"],
-        "query": "beibei DSE question bank deploy",
-        "priority": 8,
-    },
-    {
-        "name": "telegram-delivery",
-        "patterns": ["发文件", "send file", "telegram", "sendDocument"],
-        "query": "telegram file delivery sendDocument curl",
-        "priority": 7,
-    },
-    {
-        "name": "user-identity",
-        "patterns": ["Steven", "左灏", "姚宗宏", "Nitrogen"],
-        "query": "user identity Steven Nitrogen 左灏 姚宗宏",
-        "priority": 9,
-    },
-    {
-        "name": "cron-management",
-        "patterns": ["cron", "定时任务", "cronjob", "scheduled"],
-        "query": "cron job scheduled task delivery",
-        "priority": 6,
-    },
-    {
-        "name": "vision-image",
-        "patterns": ["看图", "图片", "image", "screenshot", "截图", "vision"],
-        "query": "vision image analysis screenshot mimo",
-        "priority": 5,
-    },
-    {
-        "name": "memory-system",
-        "patterns": ["记忆", "memory", "hindsight", "元认知", "metacognition"],
-        "query": "memory hindsight metacognition recall retain",
-        "priority": 9,
-    },
-]
+# Default disclosure rules — generic examples only.
+# Users should create ~/.hermes/disclosure_rules.yaml with their own rules.
+# These defaults demonstrate the format without any deployment-specific data.
+_DEFAULT_RULES: list = []
 
 
 @dataclass
@@ -294,14 +247,8 @@ class DisclosureRouter:
 
     # Maps (tool_name, arg_pattern) → (reason, alternative)
     # arg_pattern is a regex matched against json.dumps of the tool arguments
-    BLOCKED_COMBINATIONS = [
-        {
-            "tool": "browser_navigate",
-            "url_pattern": r"linux\.do|linuxdo",
-            "reason": "linux.do uses Cloudflare protection. browser_navigate gets blocked.",
-            "alternative": "Use camoufox (Python) to open the page with anti-detection, or use curl for JSON API (.json endpoint).",
-        },
-    ]
+    # Populate via ~/.hermes/disclosure_rules.yaml or plugin hooks.
+    BLOCKED_COMBINATIONS: list = []
 
     def check_tool_call(self, tool_name: str, tool_args: dict) -> Optional[str]:
         """
