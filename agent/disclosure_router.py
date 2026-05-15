@@ -39,7 +39,13 @@ _DEFAULT_RULES: list = []
 
 @dataclass
 class DisclosureRule:
-    """A single disclosure trigger rule."""
+    """A single disclosure trigger rule.
+
+    Pattern format:
+      - Plain text: "beibei" → literal match (case-insensitive)
+      - Regex: prefix with "(?:" or "\b" to use as regex
+      - Short tokens (<4 chars) get word-boundary protection automatically
+    """
     name: str
     patterns: List[str]
     query: str
@@ -48,9 +54,25 @@ class DisclosureRule:
     _regex: List[re.Pattern] = field(default_factory=list, repr=False)
 
     def __post_init__(self):
-        self._regex = [
-            re.compile(re.escape(p), re.IGNORECASE) for p in self.patterns
-        ]
+        self._regex = [self._compile(p) for p in self.patterns]
+
+    @staticmethod
+    def _compile(pattern: str) -> re.Pattern:
+        """Compile a pattern string into a regex.
+
+        - If pattern starts with '(?' or '\\b' → treat as raw regex
+        - If pattern is short (<4 chars) → add word boundaries to prevent
+          false positives (e.g. "git" matching "digital")
+        - Otherwise → literal match, case-insensitive
+        """
+        # Explicit regex: user opted in
+        if pattern.startswith("(?") or pattern.startswith("\\b") or pattern.startswith("\b"):
+            return re.compile(pattern, re.IGNORECASE)
+        # Short tokens: protect with word boundaries
+        if len(pattern) < 4 and pattern.isascii() and pattern.isalpha():
+            return re.compile(r"(?:^||\W)" + re.escape(pattern) + r"(?:|\W|$)", re.IGNORECASE)
+        # Default: literal substring match
+        return re.compile(re.escape(pattern), re.IGNORECASE)
 
     def matches(self, text: str) -> bool:
         """Check if any pattern matches the given text."""
