@@ -160,7 +160,7 @@ from agent.model_metadata import (
 from agent.context_compressor import ContextCompressor
 from agent.subdirectory_hints import SubdirectoryHintTracker
 from agent.prompt_caching import apply_anthropic_cache_control
-from agent.prompt_builder import build_skills_system_prompt, build_context_files_prompt, build_environment_hints, load_soul_md, TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS, GOOGLE_MODEL_OPERATIONAL_GUIDANCE, OPENAI_MODEL_EXECUTION_GUIDANCE
+from agent.prompt_builder import build_skills_system_prompt, build_context_files_prompt, build_environment_hints, load_soul_md, build_memory_index_block, TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS, GOOGLE_MODEL_OPERATIONAL_GUIDANCE, OPENAI_MODEL_EXECUTION_GUIDANCE
 from agent.usage_pricing import estimate_usage_cost, normalize_usage
 from agent.codex_responses_adapter import (
     _derive_responses_function_call_id as _codex_derive_responses_function_call_id,
@@ -12061,6 +12061,15 @@ class AIAgent:
                         logger.debug("Session DB update_system_prompt failed: %s", e)
 
         active_system_prompt = self._cached_system_prompt
+
+        # Memory Index — inject compact memory summary into system prompt
+        try:
+            _memory_index_block = build_memory_index_block(user_context={"user_id": self._user_id, "chat_id": self._chat_id} if getattr(self, '_user_id', None) else None)
+            if _memory_index_block:
+                _memory_index_block = _memory_index_block[:4000]
+                active_system_prompt = (active_system_prompt or "") + "\n\n" + _memory_index_block
+        except Exception:
+            pass
 
         # Memory Metacognition — initialize injection variables
         _disclosure_injected = ""
