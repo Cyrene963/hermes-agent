@@ -529,15 +529,15 @@ class TestFTS5Search:
         db.append_message("s1", role="user", content="How do I deploy with Docker?")
         db.append_message("s1", role="assistant", content="Use docker compose up.")
 
-        results = db.search_messages("docker")
+        results = db.search_messages("docker", user_id=None)
         assert len(results) == 2
         # At least one result should mention docker
         snippets = [r.get("snippet", "") for r in results]
         assert any("docker" in s.lower() or "Docker" in s for s in snippets)
 
     def test_search_empty_query(self, db):
-        assert db.search_messages("") == []
-        assert db.search_messages("   ") == []
+        assert db.search_messages("", user_id=None) == []
+        assert db.search_messages("   ", user_id=None) == []
 
     def test_search_with_source_filter(self, db):
         db.create_session(session_id="s1", source="cli")
@@ -546,7 +546,7 @@ class TestFTS5Search:
         db.create_session(session_id="s2", source="telegram")
         db.append_message("s2", role="user", content="Telegram question about Python")
 
-        results = db.search_messages("Python", source_filter=["telegram"])
+        results = db.search_messages("Python", source_filter=["telegram"], user_id=None)
         # Should only find the telegram message
         sources = [r["source"] for r in results]
         assert all(s == "telegram" for s in sources)
@@ -555,7 +555,7 @@ class TestFTS5Search:
         db.create_session(session_id="s1", source="acp")
         db.append_message("s1", role="user", content="ACP question about Python")
 
-        results = db.search_messages("Python")
+        results = db.search_messages("Python", user_id=None)
         sources = [r["source"] for r in results]
         assert "acp" in sources
 
@@ -566,7 +566,7 @@ class TestFTS5Search:
             db.create_session(session_id=sid, source=src)
             db.append_message(sid, role="user", content=f"universal search test from {src}")
 
-        results = db.search_messages("universal search test")
+        results = db.search_messages("universal search test", user_id=None)
         found_sources = {r["source"] for r in results}
         assert found_sources == {"cli", "telegram", "signal", "homeassistant", "acp", "matrix"}
 
@@ -575,7 +575,7 @@ class TestFTS5Search:
         db.append_message("s1", role="user", content="What is FastAPI?")
         db.append_message("s1", role="assistant", content="FastAPI is a web framework.")
 
-        results = db.search_messages("FastAPI", role_filter=["assistant"])
+        results = db.search_messages("FastAPI", role_filter=["assistant"], user_id=None)
         roles = [r["role"] for r in results]
         assert all(r == "assistant" for r in roles)
 
@@ -584,7 +584,7 @@ class TestFTS5Search:
         db.append_message("s1", role="user", content="Tell me about Kubernetes")
         db.append_message("s1", role="assistant", content="Kubernetes is an orchestrator.")
 
-        results = db.search_messages("Kubernetes")
+        results = db.search_messages("Kubernetes", user_id=None)
         assert len(results) == 2
         assert "context" in results[0]
         assert isinstance(results[0]["context"], list)
@@ -600,7 +600,7 @@ class TestFTS5Search:
         db.append_message("s2", role="assistant", content="another other session message")
         db.append_message("s1", role="user", content="after needle")
 
-        results = db.search_messages('"needle match"')
+        results = db.search_messages('"needle match"', user_id=None)
         needle_result = next(r for r in results if r["session_id"] == "s1" and "needle match" in r["snippet"])
 
         assert [msg["content"] for msg in needle_result["context"]] == [
@@ -627,7 +627,7 @@ class TestFTS5Search:
         ]
         for query in dangerous_queries:
             # Must not raise — should return list (possibly empty)
-            results = db.search_messages(query)
+            results = db.search_messages(query, user_id=None)
             assert isinstance(results, list), f"Query {query!r} did not return a list"
 
     def test_search_sanitized_query_still_finds_content(self, db):
@@ -636,7 +636,7 @@ class TestFTS5Search:
         db.append_message("s1", role="user", content="Learning C++ templates today")
 
         # "C++" sanitized to "C" should still match "C++"
-        results = db.search_messages("C++")
+        results = db.search_messages("C++", user_id=None)
         # The word "C" appears in the content, so FTS5 should find it
         assert isinstance(results, list)
 
@@ -645,7 +645,7 @@ class TestFTS5Search:
         db.create_session(session_id="s1", source="cli")
         db.append_message("s1", role="user", content="Run the chat-send command")
 
-        results = db.search_messages("chat-send")
+        results = db.search_messages("chat-send", user_id=None)
         assert isinstance(results, list)
         assert len(results) >= 1
         assert any("chat-send" in (r.get("snippet") or r.get("content", "")).lower()
@@ -657,11 +657,11 @@ class TestFTS5Search:
         db.append_message("s1", role="user", content="Working on P2.2 session_search edge cases")
         db.append_message("s1", role="assistant", content="See simulate.p2.test.ts for details")
 
-        results = db.search_messages("P2.2")
+        results = db.search_messages("P2.2", user_id=None)
         assert isinstance(results, list)
         assert len(results) >= 1
 
-        results2 = db.search_messages("simulate.p2.test.ts")
+        results2 = db.search_messages("simulate.p2.test.ts", user_id=None)
         assert isinstance(results2, list)
         assert len(results2) >= 1
 
@@ -672,7 +672,7 @@ class TestFTS5Search:
         db.append_message("s1", role="assistant", content="networking docker tips")
 
         # Quoted phrase should match only the exact order
-        results = db.search_messages('"docker networking"')
+        results = db.search_messages('"docker networking"', user_id=None)
         assert isinstance(results, list)
         # Should find the user message (exact phrase) but may or may not find
         # the assistant message depending on FTS5 phrase matching
@@ -816,28 +816,28 @@ class TestCJKSearchFallback:
             "s1", role="user",
             content="昨天和其他Agent的聊天记录，记忆断裂问题复现了",
         )
-        results = db.search_messages("记忆断裂")
+        results = db.search_messages("记忆断裂", user_id=None)
         assert len(results) == 1
         assert results[0]["session_id"] == "s1"
 
     def test_chinese_bigram_query(self, db):
         db.create_session(session_id="s1", source="telegram")
         db.append_message("s1", role="user", content="今天讨论A2A通信协议的实现")
-        results = db.search_messages("通信")
+        results = db.search_messages("通信", user_id=None)
         assert len(results) == 1
 
     def test_korean_query_returns_results(self, db):
         """Guards against Hangul range typos (\\uac00-\\ud7af, not \\ud7a0-)."""
         db.create_session(session_id="s1", source="cli")
         db.append_message("s1", role="user", content="안녕하세요 반갑습니다")
-        results = db.search_messages("안녕")
+        results = db.search_messages("안녕", user_id=None)
         assert len(results) == 1
 
     def test_japanese_query_returns_results(self, db):
         db.create_session(session_id="s1", source="cli")
         db.append_message("s1", role="user", content="こんにちは世界")
-        assert len(db.search_messages("こんにちは")) == 1
-        assert len(db.search_messages("世界")) == 1
+        assert len(db.search_messages("こんにちは", user_id=None)) == 1
+        assert len(db.search_messages("世界", user_id=None)) == 1
 
     def test_cjk_fallback_preserves_source_filter(self, db):
         """Guards against the SQL-builder bug where filter clauses land
@@ -847,7 +847,7 @@ class TestCJKSearchFallback:
         db.append_message("s1", role="user", content="记忆断裂在CLI")
         db.append_message("s2", role="user", content="记忆断裂在Telegram")
 
-        results = db.search_messages("记忆断裂", source_filter=["telegram"])
+        results = db.search_messages("记忆断裂", source_filter=["telegram"], user_id=None)
         assert len(results) == 1
         assert results[0]["source"] == "telegram"
 
@@ -857,7 +857,7 @@ class TestCJKSearchFallback:
         db.append_message("s1", role="user", content="记忆断裂在CLI")
         db.append_message("s2", role="assistant", content="记忆断裂在tool")
 
-        results = db.search_messages("记忆断裂", exclude_sources=["tool"])
+        results = db.search_messages("记忆断裂", exclude_sources=["tool"], user_id=None)
         sources = {r["source"] for r in results}
         assert "tool" not in sources
         assert "cli" in sources
@@ -867,7 +867,7 @@ class TestCJKSearchFallback:
         db.append_message("s1", role="user", content="用户说的记忆断裂")
         db.append_message("s1", role="assistant", content="助手说的记忆断裂")
 
-        results = db.search_messages("记忆断裂", role_filter=["assistant"])
+        results = db.search_messages("记忆断裂", role_filter=["assistant"], user_id=None)
         assert len(results) == 1
         assert results[0]["role"] == "assistant"
 
@@ -880,7 +880,7 @@ class TestCJKSearchFallback:
             "s1", role="user",
             content=f"{long_prefix}记忆断裂{long_suffix}",
         )
-        results = db.search_messages("记忆断裂")
+        results = db.search_messages("记忆断裂", user_id=None)
         assert len(results) == 1
         # The centered substr() snippet must include the matched term.
         assert "记忆断裂" in results[0]["snippet"]
@@ -889,7 +889,7 @@ class TestCJKSearchFallback:
         """English queries must not trigger the LIKE fallback (fast path regression)."""
         db.create_session(session_id="s1", source="cli")
         db.append_message("s1", role="user", content="Deploy docker containers")
-        results = db.search_messages("docker")
+        results = db.search_messages("docker", user_id=None)
         assert len(results) == 1
         # No CJK in query → LIKE fallback must not run. We don't assert this
         # directly (no instrumentation), but the FTS5 path produces an
@@ -899,7 +899,7 @@ class TestCJKSearchFallback:
     def test_cjk_query_with_no_matches_returns_empty(self, db):
         db.create_session(session_id="s1", source="cli")
         db.append_message("s1", role="user", content="unrelated English content")
-        results = db.search_messages("记忆断裂")
+        results = db.search_messages("记忆断裂", user_id=None)
         assert results == []
 
     def test_mixed_cjk_english_query(self, db):
@@ -909,7 +909,7 @@ class TestCJKSearchFallback:
         # "Agent通信" is CJK+English — FTS5 default tokenizer indexes the
         # whole CJK run with embedded "agent" as separate tokens; the LIKE
         # fallback handles the substring correctly.
-        results = db.search_messages("Agent通信")
+        results = db.search_messages("Agent通信", user_id=None)
         assert len(results) == 1
 
     def test_cjk_partial_fts5_results_supplemented_by_like(self, db):
@@ -923,7 +923,7 @@ class TestCJKSearchFallback:
         db.create_session(session_id="s2", source="telegram")
         db.append_message("s1", role="user", content="昨晚讨论了记忆系统")
         db.append_message("s2", role="user", content="昨晚的会议纪要已发送")
-        results = db.search_messages("昨晚")
+        results = db.search_messages("昨晚", user_id=None)
         assert len(results) == 2
         session_ids = {r["session_id"] for r in results}
         assert session_ids == {"s1", "s2"}
@@ -932,7 +932,7 @@ class TestCJKSearchFallback:
         """When FTS5 and LIKE both find the same message, no duplicates."""
         db.create_session(session_id="s1", source="cli")
         db.append_message("s1", role="user", content="测试去重逻辑")
-        results = db.search_messages("测试")
+        results = db.search_messages("测试", user_id=None)
         assert len(results) == 1
 
     def test_cjk_like_escapes_wildcards(self, db):
@@ -942,7 +942,7 @@ class TestCJKSearchFallback:
         db.append_message("s1", role="user", content="达成100%完成率")
         db.append_message("s2", role="user", content="达成100完成率是目标")
         # The % in the query must be literal — should only match s1
-        results = db.search_messages("100%完成")
+        results = db.search_messages("100%完成", user_id=None)
         assert len(results) == 1
         assert results[0]["session_id"] == "s1"
 
@@ -952,7 +952,7 @@ class TestCJKSearchFallback:
         db.create_session(session_id="s2", source="cli")
         db.append_message("s1", role="user", content="记忆系统很好用")
         db.append_message("s2", role="user", content="断裂连接需要修复")
-        results = db.search_messages("记忆系统 OR 断裂连接")
+        results = db.search_messages("记忆系统 OR 断裂连接", user_id=None)
         assert len(results) == 2
         session_ids = {r["session_id"] for r in results}
         assert session_ids == {"s1", "s2"}
@@ -973,7 +973,7 @@ class TestCJKSearchFallback:
         db.append_message("s2", role="user", content="漓江风景很美，值得旅游")
         db.append_message("s3", role="user", content="unrelated English content")
 
-        results = db.search_messages("广西 OR 桂林 OR 漓江 OR 旅游")
+        results = db.search_messages("广西 OR 桂林 OR 漓江 OR 旅游", user_id=None)
         session_ids = {r["session_id"] for r in results}
         assert "s1" in session_ids, "广西/桂林 terms not matched"
         assert "s2" in session_ids, "漓江/旅游 terms not matched"
@@ -986,7 +986,7 @@ class TestCJKSearchFallback:
         db.append_message("s1", role="user", content="广西旅游攻略cli")
         db.append_message("s2", role="user", content="广西旅游攻略telegram")
 
-        results = db.search_messages("广西 OR 旅游", source_filter=["telegram"])
+        results = db.search_messages("广西 OR 旅游", source_filter=["telegram"], user_id=None)
         assert len(results) == 1
         assert results[0]["source"] == "telegram"
 
@@ -1000,14 +1000,14 @@ class TestSearchSessions:
         db.create_session(session_id="s1", source="cli")
         db.create_session(session_id="s2", source="telegram")
 
-        sessions = db.search_sessions()
+        sessions = db.search_sessions(user_id=None)
         assert len(sessions) == 2
 
     def test_filter_by_source(self, db):
         db.create_session(session_id="s1", source="cli")
         db.create_session(session_id="s2", source="telegram")
 
-        sessions = db.search_sessions(source="cli")
+        sessions = db.search_sessions(source="cli", user_id=None)
         assert len(sessions) == 1
         assert sessions[0]["source"] == "cli"
 
@@ -1015,8 +1015,8 @@ class TestSearchSessions:
         for i in range(5):
             db.create_session(session_id=f"s{i}", source="cli")
 
-        page1 = db.search_sessions(limit=2)
-        page2 = db.search_sessions(limit=2, offset=2)
+        page1 = db.search_sessions(limit=2, user_id=None)
+        page2 = db.search_sessions(limit=2, offset=2, user_id=None)
         assert len(page1) == 2
         assert len(page2) == 2
         assert page1[0]["id"] != page2[0]["id"]
@@ -1291,7 +1291,7 @@ class TestSessionTitle:
         db.set_session_title("s1", "Debugging Auth")
         db.create_session(session_id="s2", source="cli")
 
-        sessions = db.search_sessions()
+        sessions = db.search_sessions(user_id=None)
         titled = [s for s in sessions if s.get("title") == "Debugging Auth"]
         assert len(titled) == 1
         assert titled[0]["id"] == "s1"
@@ -1447,7 +1447,7 @@ class TestSchemaInit:
     def test_schema_version(self, db):
         cursor = db._conn.execute("SELECT version FROM schema_version")
         version = cursor.fetchone()[0]
-        assert version == 11
+        assert version == 12
 
     def test_title_column_exists(self, db):
         """Verify the title column was created in the sessions table."""
@@ -1744,7 +1744,7 @@ class TestSchemaInit:
 
         # Verify migration
         cursor = migrated_db._conn.execute("SELECT version FROM schema_version")
-        assert cursor.fetchone()[0] == 11
+        assert cursor.fetchone()[0] == 12
 
         # Verify title column exists and is NULL for existing sessions
         session = migrated_db.get_session("existing")
@@ -2052,7 +2052,7 @@ class TestListSessionsRich:
         db.append_message("s1", "system", "You are a helpful assistant.")
         db.append_message("s1", "user", "Help me refactor the auth module please")
         db.append_message("s1", "assistant", "Sure, let me look at it.")
-        sessions = db.list_sessions_rich()
+        sessions = db.list_sessions_rich(user_id=None)
         assert len(sessions) == 1
         assert "Help me refactor the auth module" in sessions[0]["preview"]
 
@@ -2060,14 +2060,14 @@ class TestListSessionsRich:
         db.create_session("s1", "cli")
         long_msg = "A" * 100
         db.append_message("s1", "user", long_msg)
-        sessions = db.list_sessions_rich()
+        sessions = db.list_sessions_rich(user_id=None)
         assert len(sessions[0]["preview"]) == 63  # 60 chars + "..."
         assert sessions[0]["preview"].endswith("...")
 
     def test_preview_empty_when_no_user_messages(self, db):
         db.create_session("s1", "cli")
         db.append_message("s1", "system", "System prompt")
-        sessions = db.list_sessions_rich()
+        sessions = db.list_sessions_rich(user_id=None)
         assert sessions[0]["preview"] == ""
 
     def test_last_active_from_latest_message(self, db):
@@ -2076,13 +2076,13 @@ class TestListSessionsRich:
         db.append_message("s1", "user", "Hello")
         time.sleep(0.01)
         db.append_message("s1", "assistant", "Hi there!")
-        sessions = db.list_sessions_rich()
+        sessions = db.list_sessions_rich(user_id=None)
         # last_active should be close to now (the assistant message)
         assert sessions[0]["last_active"] > sessions[0]["started_at"]
 
     def test_last_active_fallback_to_started_at(self, db):
         db.create_session("s1", "cli")
-        sessions = db.list_sessions_rich()
+        sessions = db.list_sessions_rich(user_id=None)
         # No messages, so last_active falls back to started_at
         assert sessions[0]["last_active"] == sessions[0]["started_at"]
 
@@ -2114,9 +2114,9 @@ class TestListSessionsRich:
             )
             db._conn.commit()
 
-        assert [s["id"] for s in db.list_sessions_rich(limit=5)] == ["new", "old"]
+        assert [s["id"] for s in db.list_sessions_rich(limit=5, user_id=None)] == ["new", "old"]
         assert [
-            s["id"] for s in db.list_sessions_rich(limit=5, order_by_last_active=True)
+            s["id"] for s in db.list_sessions_rich(limit=5, order_by_last_active=True, user_id=None)
         ] == ["old", "new"]
 
     def test_order_by_last_active_uses_compression_tip_activity(self, db):
@@ -2171,7 +2171,7 @@ class TestListSessionsRich:
             db._conn.commit()
 
         # limit=1 is the stress test: the old root must win the single slot.
-        top = db.list_sessions_rich(limit=1, order_by_last_active=True)
+        top = db.list_sessions_rich(limit=1, order_by_last_active=True, user_id=None)
         assert len(top) == 1
         # Projection surfaces the tip's id in the root's slot.
         assert top[0]["id"] == "tip1"
@@ -2180,20 +2180,20 @@ class TestListSessionsRich:
     def test_rich_list_includes_title(self, db):
         db.create_session("s1", "cli")
         db.set_session_title("s1", "refactoring auth")
-        sessions = db.list_sessions_rich()
+        sessions = db.list_sessions_rich(user_id=None)
         assert sessions[0]["title"] == "refactoring auth"
 
     def test_rich_list_source_filter(self, db):
         db.create_session("s1", "cli")
         db.create_session("s2", "telegram")
-        sessions = db.list_sessions_rich(source="cli")
+        sessions = db.list_sessions_rich(source="cli", user_id=None)
         assert len(sessions) == 1
         assert sessions[0]["id"] == "s1"
 
     def test_preview_newlines_collapsed(self, db):
         db.create_session("s1", "cli")
         db.append_message("s1", "user", "Line one\nLine two\nLine three")
-        sessions = db.list_sessions_rich()
+        sessions = db.list_sessions_rich(user_id=None)
         assert "\n" not in sessions[0]["preview"]
         assert "Line one Line two" in sessions[0]["preview"]
 
@@ -2204,7 +2204,7 @@ class TestListSessionsRich:
         db.create_session("branch", "cli", parent_session_id="parent")
         db.append_message("branch", "user", "Exploring the alternative approach")
 
-        sessions = db.list_sessions_rich()
+        sessions = db.list_sessions_rich(user_id=None)
         ids = [s["id"] for s in sessions]
         assert "branch" in ids, "Branch session should be visible in default list"
 
@@ -2213,7 +2213,7 @@ class TestListSessionsRich:
         db.create_session("root", "cli")
         db.create_session("delegate", "cli", parent_session_id="root")
 
-        sessions = db.list_sessions_rich()
+        sessions = db.list_sessions_rich(user_id=None)
         ids = [s["id"] for s in sessions]
         assert "delegate" not in ids, "Delegate sub-agent should not appear in default list"
         assert "root" in ids
@@ -2235,7 +2235,7 @@ class TestListSessionsRich:
         )
         db._conn.commit()
 
-        sessions = db.list_sessions_rich(project_compression_tips=False)
+        sessions = db.list_sessions_rich(project_compression_tips=False, user_id=None)
         ids = [s["id"] for s in sessions]
         assert "continuation" not in ids, "Compression continuation should stay hidden"
 
@@ -2330,7 +2330,7 @@ class TestCompressionChainProjection:
         db.append_message("solo", "user", "standalone")
         db._conn.commit()
 
-        sessions = db.list_sessions_rich(source="cli", limit=20)
+        sessions = db.list_sessions_rich(source="cli", limit=20, user_id=None)
         ids = [s["id"] for s in sessions]
         # Only top-level conversations appear: tip1 (projected from root1) + solo.
         # Delegate children, mid1, and the dead root1 must NOT be in the list.
@@ -2355,8 +2355,8 @@ class TestCompressionChainProjection:
         import time as _time
         self._build_compression_chain(db, _time.time() - 3600)
         sessions = db.list_sessions_rich(
-            source="cli", limit=20, project_compression_tips=False
-        )
+            source="cli", limit=20, project_compression_tips=False,
+            user_id=None)
         ids = [s["id"] for s in sessions]
         assert "root1" in ids
         assert "tip1" not in ids
@@ -2382,7 +2382,7 @@ class TestCompressionChainProjection:
         db.append_message("newer", "user", "newer session started after root1")
         db._conn.commit()
 
-        sessions = db.list_sessions_rich(source="cli", limit=20)
+        sessions = db.list_sessions_rich(source="cli", limit=20, user_id=None)
         ids_in_order = [s["id"] for s in sessions]
         # 'newer' started AFTER root1 but BEFORE tip1's actual started_at.
         # Correct ordering (by root started_at): newer > tip1's lineage entry.
@@ -2403,7 +2403,7 @@ class TestCompressionChainProjection:
         )
         db._conn.commit()
 
-        sessions = db.list_sessions_rich(source="cli", limit=10)
+        sessions = db.list_sessions_rich(source="cli", limit=10, user_id=None)
         ids = [s["id"] for s in sessions]
         assert "orphan" in ids
         row = next(s for s in sessions if s["id"] == "orphan")
@@ -2423,7 +2423,7 @@ class TestExcludeSources:
         db.create_session("s1", "cli")
         db.create_session("s2", "tool")
         db.create_session("s3", "telegram")
-        sessions = db.list_sessions_rich(exclude_sources=["tool"])
+        sessions = db.list_sessions_rich(exclude_sources=["tool"], user_id=None)
         ids = [s["id"] for s in sessions]
         assert "s1" in ids
         assert "s3" in ids
@@ -2432,7 +2432,7 @@ class TestExcludeSources:
     def test_list_sessions_rich_no_exclusion_returns_all(self, db):
         db.create_session("s1", "cli")
         db.create_session("s2", "tool")
-        sessions = db.list_sessions_rich()
+        sessions = db.list_sessions_rich(user_id=None)
         ids = [s["id"] for s in sessions]
         assert "s1" in ids
         assert "s2" in ids
@@ -2443,7 +2443,7 @@ class TestExcludeSources:
         db.create_session("s2", "tool")
         db.create_session("s3", "telegram")
         # Explicit source filter: only tool sessions, no exclusion
-        sessions = db.list_sessions_rich(source="tool")
+        sessions = db.list_sessions_rich(source="tool", user_id=None)
         ids = [s["id"] for s in sessions]
         assert ids == ["s2"]
 
@@ -2452,7 +2452,7 @@ class TestExcludeSources:
         db.create_session("s2", "tool")
         db.create_session("s3", "cron")
         db.create_session("s4", "telegram")
-        sessions = db.list_sessions_rich(exclude_sources=["tool", "cron"])
+        sessions = db.list_sessions_rich(exclude_sources=["tool", "cron"], user_id=None)
         ids = [s["id"] for s in sessions]
         assert "s1" in ids
         assert "s4" in ids
@@ -2464,7 +2464,7 @@ class TestExcludeSources:
         db.append_message("s1", "user", "Python deployment question")
         db.create_session("s2", "tool")
         db.append_message("s2", "user", "Python automated question")
-        results = db.search_messages("Python", exclude_sources=["tool"])
+        results = db.search_messages("Python", exclude_sources=["tool"], user_id=None)
         sources = [r["source"] for r in results]
         assert "cli" in sources
         assert "tool" not in sources
@@ -2474,7 +2474,7 @@ class TestExcludeSources:
         db.append_message("s1", "user", "Rust deployment question")
         db.create_session("s2", "tool")
         db.append_message("s2", "user", "Rust automated question")
-        results = db.search_messages("Rust")
+        results = db.search_messages("Rust", user_id=None)
         sources = [r["source"] for r in results]
         assert "cli" in sources
         assert "tool" in sources
@@ -2489,8 +2489,8 @@ class TestExcludeSources:
         db.append_message("s3", "user", "Golang test")
         # Include cli+tool, but exclude tool → should only return cli
         results = db.search_messages(
-            "Golang", source_filter=["cli", "tool"], exclude_sources=["tool"]
-        )
+            "Golang", source_filter=["cli", "tool"], exclude_sources=["tool"],
+            user_id=None)
         sources = [r["source"] for r in results]
         assert sources == ["cli"]
 
@@ -2767,7 +2767,7 @@ class TestFTS5ToolCallIndexing:
             "s1", role="assistant", content="",
             tool_name="UNIQUETOOLNAME",
         )
-        results = db.search_messages("UNIQUETOOLNAME")
+        results = db.search_messages("UNIQUETOOLNAME", user_id=None)
         assert len(results) == 1
 
     def test_tool_calls_args_are_searchable(self, db):
@@ -2783,7 +2783,7 @@ class TestFTS5ToolCallIndexing:
                 },
             }],
         )
-        results = db.search_messages("UNIQUESEARCHTOKEN")
+        results = db.search_messages("UNIQUESEARCHTOKEN", user_id=None)
         assert len(results) == 1
 
     def test_tool_function_name_in_tool_calls_is_searchable(self, db):
@@ -2796,7 +2796,7 @@ class TestFTS5ToolCallIndexing:
                 "function": {"name": "UNIQUEFUNCNAME", "arguments": "{}"},
             }],
         )
-        results = db.search_messages("UNIQUEFUNCNAME")
+        results = db.search_messages("UNIQUEFUNCNAME", user_id=None)
         assert len(results) == 1
 
     def test_delete_message_row_does_not_crash(self, db):
@@ -2823,8 +2823,8 @@ class TestFTS5ToolCallIndexing:
             conn.execute("DELETE FROM messages WHERE session_id = ?", ("s1",))
         db._execute_write(_delete)  # must not raise
 
-        assert db.search_messages("hello") == []
-        assert db.search_messages("web_search") == []
+        assert db.search_messages("hello", user_id=None) == []
+        assert db.search_messages("web_search", user_id=None) == []
 
     def test_update_message_reindexes_tool_fields(self, db):
         """UPDATE must refresh the FTS row so old tokens drop out and new tokens appear."""
@@ -2833,7 +2833,7 @@ class TestFTS5ToolCallIndexing:
             "s1", role="assistant", content="",
             tool_name="ORIGINALTOOL",
         )
-        assert len(db.search_messages("ORIGINALTOOL")) == 1
+        assert len(db.search_messages("ORIGINALTOOL", user_id=None)) == 1
 
         def _update(conn):
             conn.execute(
@@ -2842,8 +2842,8 @@ class TestFTS5ToolCallIndexing:
             )
         db._execute_write(_update)
 
-        assert db.search_messages("ORIGINALTOOL") == []
-        assert len(db.search_messages("RENAMEDTOOL")) == 1
+        assert db.search_messages("ORIGINALTOOL", user_id=None) == []
+        assert len(db.search_messages("RENAMEDTOOL", user_id=None)) == 1
 
 
 class TestFTS5ToolCallMigration:
@@ -2930,16 +2930,115 @@ class TestFTS5ToolCallMigration:
         # Now open via SessionDB — migration runs.
         session_db = SessionDB(db_path=db_path)
         try:
-            assert len(session_db.search_messages("LEGACYTOOL")) == 1, \
+            assert len(session_db.search_messages("LEGACYTOOL", user_id=None)) == 1, \
                 "v11 migration must backfill tool_name into FTS"
-            assert len(session_db.search_messages("LEGACYARG")) == 1, \
+            assert len(session_db.search_messages("LEGACYARG", user_id=None)) == 1, \
                 "v11 migration must backfill tool_calls JSON into FTS"
             # schema_version bumped
             row = session_db._conn.execute(
                 "SELECT version FROM schema_version LIMIT 1"
             ).fetchone()
             version = row["version"] if hasattr(row, "keys") else row[0]
-            assert version == 11
+            assert version == 12
         finally:
             session_db.close()
 
+
+
+class TestMultiUserIsolation:
+    """Verify that user_id is enforced at the SQL level."""
+
+    def _seed_ab_data(self, db):
+        db.create_session(session_id="s-a1", source="telegram", user_id="111")
+        db.append_message("s-a1", role="user", content="Alice secret project alpha")
+        db.append_message("s-a1", role="assistant", content="Alpha project details for Alice")
+        db.create_session(session_id="s-a2", source="telegram", user_id="111")
+        db.append_message("s-a2", role="user", content="Alice second conversation beta")
+        db.create_session(session_id="s-b1", source="telegram", user_id="222")
+        db.append_message("s-b1", role="user", content="Bob confidential report gamma")
+        db.append_message("s-b1", role="assistant", content="Gamma report details for Bob")
+        db.create_session(session_id="s-b2", source="cli", user_id=None)
+        db.append_message("s-b2", role="user", content="CLI session no user delta")
+
+    def test_list_sessions_rich_requires_user_id(self, db):
+        with pytest.raises(TypeError, match="user_id"):
+            db.list_sessions_rich()
+
+    def test_search_messages_requires_user_id(self, db):
+        with pytest.raises(TypeError, match="user_id"):
+            db.search_messages("test")
+
+    def test_search_sessions_requires_user_id(self, db):
+        with pytest.raises(TypeError, match="user_id"):
+            db.search_sessions()
+
+    def test_explicit_none_returns_all_sessions(self, db):
+        self._seed_ab_data(db)
+        sessions = db.list_sessions_rich(user_id=None)
+        ids = {s["id"] for s in sessions}
+        assert "s-a1" in ids and "s-b1" in ids and "s-b2" in ids
+
+    def test_explicit_none_returns_all_messages(self, db):
+        self._seed_ab_data(db)
+        results = db.search_messages("Alice OR Bob", user_id=None)
+        assert len(results) >= 2
+
+    def test_user_a_cannot_see_user_b_sessions(self, db):
+        self._seed_ab_data(db)
+        sessions = db.list_sessions_rich(user_id="111")
+        ids = {s["id"] for s in sessions}
+        assert "s-a1" in ids and "s-a2" in ids
+        assert "s-b1" not in ids and "s-b2" not in ids
+
+    def test_user_b_cannot_see_user_a_sessions(self, db):
+        self._seed_ab_data(db)
+        sessions = db.list_sessions_rich(user_id="222")
+        ids = {s["id"] for s in sessions}
+        assert "s-b1" in ids
+        assert "s-a1" not in ids and "s-a2" not in ids
+
+    def test_user_a_cannot_see_user_b_messages(self, db):
+        self._seed_ab_data(db)
+        assert len(db.search_messages("gamma", user_id="111")) == 0
+        assert len(db.search_messages("alpha", user_id="111")) >= 1
+
+    def test_user_b_cannot_see_user_a_messages(self, db):
+        self._seed_ab_data(db)
+        assert len(db.search_messages("alpha", user_id="222")) == 0
+        assert len(db.search_messages("gamma", user_id="222")) >= 1
+
+    def test_search_sessions_isolation(self, db):
+        self._seed_ab_data(db)
+        sessions_a = db.search_sessions(user_id="111")
+        ids_a = {s["id"] for s in sessions_a}
+        assert "s-a1" in ids_a and "s-b1" not in ids_a
+
+    def test_cjk_search_isolation(self, db):
+        db.create_session(session_id="cjk-a", source="telegram", user_id="111")
+        db.append_message("cjk-a", role="user", content="记忆系统测试用户甲专用内容")
+        db.create_session(session_id="cjk-b", source="telegram", user_id="222")
+        db.append_message("cjk-b", role="user", content="记忆系统测试用户乙专用内容")
+        results_a = db.search_messages("记忆系统", user_id="111")
+        session_ids_a = {r["session_id"] for r in results_a}
+        assert "cjk-a" in session_ids_a and "cjk-b" not in session_ids_a
+
+    def test_source_filter_with_user_id(self, db):
+        self._seed_ab_data(db)
+        results = db.list_sessions_rich(source="telegram", user_id="222")
+        ids = {s["id"] for s in results}
+        assert "s-b1" in ids and "s-b2" not in ids
+
+    def test_idx_sessions_user_exists(self, db):
+        cursor = db._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_sessions_user'"
+        )
+        assert cursor.fetchone() is not None
+
+    def test_schema_version_is_12(self, db):
+        row = db._conn.execute("SELECT version FROM schema_version LIMIT 1").fetchone()
+        version = row["version"] if hasattr(row, "keys") else row[0]
+        assert version == 12
+
+    def test_user_with_no_sessions_returns_empty(self, db):
+        self._seed_ab_data(db)
+        assert len(db.list_sessions_rich(user_id="999")) == 0

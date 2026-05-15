@@ -601,7 +601,7 @@ def scan_sessions(
 
     db = SessionDB()
     try:
-        sessions_meta = db.list_sessions_rich(limit=db_limit, include_children=True, project_compression_tips=False)
+        sessions_meta = db.list_sessions_rich(limit=db_limit, include_children=True, project_compression_tips=False, user_id=None)
         total_sessions = len(sessions_meta)
         sessions: List[Dict[str, Any]] = []
         checkpoint_sessions: Dict[str, Any] = {}

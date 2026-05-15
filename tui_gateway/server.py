@@ -2168,7 +2168,7 @@ def _(rid, params: dict) -> dict:
         fetch_limit = max(limit * 2, 200)
         rows = [
             s
-            for s in db.list_sessions_rich(source=None, limit=fetch_limit)
+            for s in db.list_sessions_rich(source=None, limit=fetch_limit, user_id=None)
             if (s.get("source") or "").strip().lower() not in deny
         ][:limit]
         return _ok(
@@ -2215,7 +2215,7 @@ def _(rid, params: dict) -> dict:
         # users (lots of recent ``tool`` rows) don't get a false
         # "no eligible session" answer.  ``session.list`` uses a
         # similar over-fetch strategy.
-        rows = db.list_sessions_rich(source=None, limit=200)
+        rows = db.list_sessions_rich(source=None, limit=200, user_id=None)
         for row in rows:
             src = (row.get("source") or "").strip().lower()
             if src in deny:
@@ -5726,7 +5726,7 @@ def _(rid, params: dict) -> dict:
         cutoff = time.time() - days * 86400
         rows = [
             s
-            for s in db.list_sessions_rich(limit=500)
+            for s in db.list_sessions_rich(limit=500, user_id=None)
             if (s.get("started_at") or 0) >= cutoff
         ]
         return _ok(

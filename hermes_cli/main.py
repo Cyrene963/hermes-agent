@@ -646,7 +646,7 @@ def _resolve_last_session(source: str = "cli") -> Optional[str]:
         from hermes_state import SessionDB
 
         db = SessionDB()
-        sessions = db.search_sessions(source=source, limit=1)
+        sessions = db.search_sessions(source=source, limit=1, user_id=None)
         return sessions[0]["id"] if sessions else None
     except Exception:
         pass
@@ -11274,7 +11274,7 @@ Examples:
 
         if action == "list":
             sessions = db.list_sessions_rich(
-                source=args.source, exclude_sources=_exclude, limit=args.limit
+                source=args.source, exclude_sources=_exclude, limit=args.limit, user_id=None,
             )
             if not sessions:
                 print("No sessions found.")
@@ -11382,7 +11382,7 @@ Examples:
             source = getattr(args, "source", None)
             _browse_exclude = None if source else ["tool"]
             sessions = db.list_sessions_rich(
-                source=source, exclude_sources=_browse_exclude, limit=limit
+                source=source, exclude_sources=_browse_exclude, limit=limit, user_id=None,
             )
             db.close()
             if not sessions:

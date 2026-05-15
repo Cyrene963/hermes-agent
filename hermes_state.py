@@ -31,9 +31,11 @@ logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
+_REQUIRED = object()
+
 DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 # ---------------------------------------------------------------------------
 # WAL-compatibility fallback
@@ -570,6 +572,11 @@ class SessionDB:
         # migration was skipped (e.g. due to version renumbering), the
         # column gets created here.
         self._reconcile_columns(cursor)
+
+        # ── Index creation (after column reconciliation) ─────────────
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)"
+        )
 
         # ── Schema version bookkeeping ─────────────────────────────────
         # Bump to current so future data migrations (if any) can gate on
@@ -1168,6 +1175,7 @@ class SessionDB:
         include_children: bool = False,
         project_compression_tips: bool = True,
         order_by_last_active: bool = False,
+        user_id=_REQUIRED,
     ) -> List[Dict[str, Any]]:
         """List sessions with preview (first user message) and last active timestamp.
 
@@ -1195,7 +1203,11 @@ class SessionDB:
         surfaces in the correct slot. Ordering is computed at SQL level via
         a recursive CTE that walks compression-continuation edges, so LIMIT
         and OFFSET still apply efficiently.
+
+        **Multi-user isolation:** ``user_id`` is required. Pass ``user_id=None`` explicitly to opt out.
         """
+        if user_id is _REQUIRED:
+            raise TypeError("list_sessions_rich() missing required argument: user_id")
         where_clauses = []
         params = []
 
@@ -1220,6 +1232,10 @@ class SessionDB:
             placeholders = ",".join("?" for _ in exclude_sources)
             where_clauses.append(f"s.source NOT IN ({placeholders})")
             params.extend(exclude_sources)
+
+        if user_id:
+            where_clauses.append("s.user_id = ?")
+            params.append(user_id)
 
         where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
         if order_by_last_active:
@@ -1885,6 +1901,7 @@ class SessionDB:
         role_filter: List[str] = None,
         limit: int = 20,
         offset: int = 0,
+        user_id=_REQUIRED,
     ) -> List[Dict[str, Any]]:
         """
         Full-text search across session messages using FTS5.
@@ -1897,7 +1914,12 @@ class SessionDB:
 
         Returns matching messages with session metadata, content snippet,
         and surrounding context (1 message before and after the match).
+
+        **Multi-user isolation:** ``user_id`` is required. Pass ``user_id=None`` explicitly to opt out.
         """
+        if user_id is _REQUIRED:
+            raise TypeError("search_messages() missing required argument: user_id")
+
         if not query or not query.strip():
             return []
 
@@ -1923,6 +1945,10 @@ class SessionDB:
             role_placeholders = ",".join("?" for _ in role_filter)
             where_clauses.append(f"m.role IN ({role_placeholders})")
             params.extend(role_filter)
+
+        if user_id:
+            where_clauses.append("s.user_id = ?")
+            params.append(user_id)
 
         where_sql = " AND ".join(where_clauses)
         params.extend([limit, offset])
@@ -1996,6 +2022,9 @@ class SessionDB:
                 if role_filter:
                     tri_where.append(f"m.role IN ({','.join('?' for _ in role_filter)})")
                     tri_params.extend(role_filter)
+                if user_id:
+                    tri_where.append("s.user_id = ?")
+                    tri_params.append(user_id)
                 tri_sql = f"""
                     SELECT
                         m.id,
@@ -2051,6 +2080,9 @@ class SessionDB:
                 if role_filter:
                     like_where.append(f"m.role IN ({','.join('?' for _ in role_filter)})")
                     like_params.extend(role_filter)
+                if user_id:
+                    like_where.append("s.user_id = ?")
+                    like_params.append(user_id)
                 like_sql = f"""
                     SELECT m.id, m.session_id, m.role,
                            substr(m.content,
@@ -2153,13 +2185,18 @@ class SessionDB:
         source: str = None,
         limit: int = 20,
         offset: int = 0,
+        user_id=_REQUIRED,
     ) -> List[Dict[str, Any]]:
         """List sessions, optionally filtered by source.
 
         Returns rows enriched with a computed ``last_active`` column (latest
         message timestamp for the session, falling back to ``started_at``),
         ordered by most-recently-used first.
+
+        **Multi-user isolation:** ``user_id`` is required. Pass ``user_id=None`` explicitly to opt out.
         """
+        if user_id is _REQUIRED:
+            raise TypeError("search_sessions() missing required argument: user_id")
         select_with_last_active = (
             "SELECT s.*, COALESCE(m.last_active, s.started_at) AS last_active "
             "FROM sessions s "
@@ -2169,12 +2206,26 @@ class SessionDB:
             ") m ON m.session_id = s.id "
         )
         with self._lock:
-            if source:
+            if source and user_id is not None and user_id is not _REQUIRED:
+                cursor = self._conn.execute(
+                    f"{select_with_last_active}"
+                    "WHERE s.source = ? AND s.user_id = ? "
+                    "ORDER BY last_active DESC, s.started_at DESC, s.id DESC LIMIT ? OFFSET ?",
+                    (source, user_id, limit, offset),
+                )
+            elif source:
                 cursor = self._conn.execute(
                     f"{select_with_last_active}"
                     "WHERE s.source = ? "
                     "ORDER BY last_active DESC, s.started_at DESC, s.id DESC LIMIT ? OFFSET ?",
                     (source, limit, offset),
+                )
+            elif user_id is not None and user_id is not _REQUIRED:
+                cursor = self._conn.execute(
+                    f"{select_with_last_active}"
+                    "WHERE s.user_id = ? "
+                    "ORDER BY last_active DESC, s.started_at DESC, s.id DESC LIMIT ? OFFSET ?",
+                    (user_id, limit, offset),
                 )
             else:
                 cursor = self._conn.execute(
@@ -2227,7 +2278,7 @@ class SessionDB:
         Export all sessions (with messages) as a list of dicts.
         Suitable for writing to a JSONL file for backup/analysis.
         """
-        sessions = self.search_sessions(source=source, limit=100000)
+        sessions = self.search_sessions(source=source, limit=100000, user_id=None)
         results = []
         for session in sessions:
             messages = self.get_messages(session["id"])
