@@ -571,7 +571,7 @@ def build_index_provider(user_context: Optional[Dict] = None) -> MemoryIndexProv
     """Build MemoryIndexProvider from policy config."""
     policy = load_policy(user_context=user_context)
     index_cfg = policy.get("memory_index", {})
-    if not index_cfg.get("enabled", False):
+    if not index_cfg.get("enabled", True):
         return NoOpIndexProvider()
     script_dir = index_cfg.get("script_dir")
     timeout = index_cfg.get("timeout", 5)
@@ -585,7 +585,7 @@ def build_query_expander(user_context: Optional[Dict] = None) -> RecallQueryExpa
     """
     policy = load_policy(user_context=user_context)
     expansion_cfg = policy.get("query_expansion", {})
-    if not expansion_cfg.get("enabled", False):
+    if not expansion_cfg.get("enabled", True):
         return PassthroughExpander()
     expansions = expansion_cfg.get("expansions", {})
     max_queries = expansion_cfg.get("max_queries", 8)
@@ -599,7 +599,7 @@ def build_preflight_policy(user_context: Optional[Dict] = None) -> MemoryPreflig
     """
     policy = load_policy(user_context=user_context)
     preflight_cfg = policy.get("preflight", {})
-    if not preflight_cfg.get("enabled", False):
+    if not preflight_cfg.get("enabled", True):
         return NoOpPreflightPolicy()
     rules = preflight_cfg.get("rules", [])
     api = preflight_cfg.get("hindsight_api", "http://localhost:9177")
@@ -712,7 +712,7 @@ def build_strategy_preflight(user_context: Optional[Dict] = None) -> TaskRouting
     """Build TaskRoutingPreflight from policy config."""
     policy = load_policy(user_context=user_context)
     routing_cfg = policy.get("routing_preflight", {})
-    if not routing_cfg.get("enabled", False):
+    if not routing_cfg.get("enabled", True):
         return TaskRoutingPreflight()  # no-op (empty rules)
     rules = routing_cfg.get("rules", [])
     api = routing_cfg.get("hindsight_api",
@@ -1183,7 +1183,7 @@ def build_conversation_recall(user_context: Optional[Dict] = None) -> Conversati
     """Build ConversationRecall from policy config."""
     policy = load_policy(user_context=user_context)
     cfg = policy.get("conversation_recall", {})
-    if not cfg.get("enabled", False):
+    if not cfg.get("enabled", True):
         return ConversationRecall()  # Returns empty on check() since no API configured
 
     api = cfg.get("hindsight_api",
