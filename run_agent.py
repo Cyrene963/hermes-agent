@@ -161,6 +161,14 @@ from agent.context_compressor import ContextCompressor
 from agent.subdirectory_hints import SubdirectoryHintTracker
 from agent.prompt_caching import apply_anthropic_cache_control
 from agent.prompt_builder import build_skills_system_prompt, build_context_files_prompt, build_environment_hints, load_soul_md, TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS, GOOGLE_MODEL_OPERATIONAL_GUIDANCE, OPENAI_MODEL_EXECUTION_GUIDANCE
+
+# Disclosure Router — proactive memory injection via trigger conditions
+try:
+    from agent.disclosure_router import DisclosureRouter
+    _disclosure_router = DisclosureRouter()
+except Exception:
+    _disclosure_router = None
+
 from agent.usage_pricing import estimate_usage_cost, normalize_usage
 from agent.codex_responses_adapter import (
     _derive_responses_function_call_id as _codex_derive_responses_function_call_id,
@@ -6064,6 +6072,17 @@ class AIAgent:
             if context_files_prompt:
                 context_parts.append(context_files_prompt)
 
+        # Memory Metacognition — inject memory index block for fast reference
+        try:
+            if not hasattr(self, '_memory_index_cached'):
+                from agent.prompt_builder import build_memory_index_block
+                _uc = {"user_id": self._user_id, "chat_id": self._chat_id} if getattr(self, '_user_id', None) else None
+                self._memory_index_cached = build_memory_index_block(user_context=_uc)
+            if self._memory_index_cached:
+                context_parts.append(self._memory_index_cached)
+        except Exception:
+            pass
+
         # ── Volatile tier (changes per session/turn — never cached) ───
         volatile_parts: List[str] = []
 
@@ -11161,15 +11180,31 @@ class AIAgent:
             if not isinstance(function_args, dict):
                 function_args = {}
 
-            # Check plugin hooks for a block directive before executing.
+            # Memory Preflight Gate (sequential path)
             _block_msg: Optional[str] = None
             try:
-                from hermes_cli.plugins import get_pre_tool_call_block_message
-                _block_msg = get_pre_tool_call_block_message(
-                    function_name, function_args, task_id=effective_task_id or "",
-                )
+                from agent.memory_metacognition import build_preflight_policy
+                _pf_uc = {"user_id": self._user_id, "chat_id": self._chat_id} if getattr(self, '_user_id', None) else None
+                _pf_policy = build_preflight_policy(user_context=_pf_uc)
+                _task_type = _pf_policy.get_task_type(function_name, function_args)
+                if _task_type:
+                    _ctx = {k: str(v)[:100] for k, v in function_args.items()}
+                    _pf = _pf_policy.run_checks(_task_type, _ctx)
+                    if _pf.decision == "block":
+                        _errors = [c.message for c in _pf.checks if c.status == "FAIL" and c.message]
+                        _block_msg = f"MEMORY PREFLIGHT BLOCKED: {chr(10).join(_errors)}"
             except Exception:
-                pass
+                pass  # Non-blocking
+
+            # Check plugin hooks for a block directive before executing.
+            if _block_msg is None:
+                try:
+                    from hermes_cli.plugins import get_pre_tool_call_block_message
+                    _block_msg = get_pre_tool_call_block_message(
+                        function_name, function_args, task_id=effective_task_id or "",
+                    )
+                except Exception:
+                    pass
 
             _guardrail_block_decision: ToolGuardrailDecision | None = None
             if _block_msg is None:
@@ -12062,6 +12097,18 @@ class AIAgent:
 
         active_system_prompt = self._cached_system_prompt
 
+        # Inject disclosure router results into system prompt if any matched
+        if _disclosure_injected:
+            active_system_prompt = (active_system_prompt or "") + "\n\n" + _disclosure_injected
+
+        # Inject strategy preflight hint if detected
+        if _strategy_hint:
+            active_system_prompt = (active_system_prompt or "") + "\n\n" + _strategy_hint
+
+        # Inject conversation recall results if any entities matched
+        if _conv_recall_cache:
+            active_system_prompt = (active_system_prompt or "") + "\n\n" + _conv_recall_cache
+
         # ── Preflight context compression ──
         # Before entering the main loop, check if the loaded conversation
         # history already exceeds the model's context threshold.  This handles
@@ -12220,7 +12267,25 @@ class AIAgent:
         if self._memory_manager:
             try:
                 _query = original_user_message if isinstance(original_user_message, str) else ""
-                _ext_prefetch_cache = self._memory_manager.prefetch_all(_query) or ""
+                # Auto-Recall Enhancement: expand query with related terms
+                # to improve hindsight recall precision.
+                try:
+                    from agent.prompt_builder import expand_recall_queries
+                    _qe_uc = {"user_id": self._user_id, "chat_id": self._chat_id} if getattr(self, '_user_id', None) else None
+                    _expanded = expand_recall_queries(_query, user_context=_qe_uc)
+                    if len(_expanded) > 1:
+                        _all_prefetch = []
+                        _seen = set()
+                        for _q in _expanded[:5]:
+                            _result = self._memory_manager.prefetch_all(_q) or ""
+                            if _result and _result not in _seen:
+                                _seen.add(_result)
+                                _all_prefetch.append(_result)
+                        _ext_prefetch_cache = "\n".join(_all_prefetch) if _all_prefetch else ""
+                    else:
+                        _ext_prefetch_cache = self._memory_manager.prefetch_all(_query) or ""
+                except Exception:
+                    _ext_prefetch_cache = self._memory_manager.prefetch_all(_query) or ""
             except Exception:
                 pass
 
