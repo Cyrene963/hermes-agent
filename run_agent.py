@@ -10647,6 +10647,7 @@ class AIAgent:
                 limit=function_args.get("limit", 3),
                 db=session_db,
                 current_session_id=self.session_id,
+                user_id=self._user_id,
             )
         elif function_name == "memory":
             target = function_args.get("target", "memory")
@@ -11283,6 +11284,7 @@ class AIAgent:
                         limit=function_args.get("limit", 3),
                         db=session_db,
                         current_session_id=self.session_id,
+                        user_id=self._user_id,
                     )
                 tool_duration = time.time() - tool_start_time
                 if self._should_emit_quiet_tool_messages():
@@ -12079,10 +12081,15 @@ class AIAgent:
         # Run disclosure router, strategy preflight, and conversation recall
         try:
             _mc_uc = {"user_id": self._user_id, "chat_id": self._chat_id} if getattr(self, '_user_id', None) else None
-            if _disclosure_router is not None:
-                _dr_result = _disclosure_router.check(original_user_message if isinstance(original_user_message, str) else "")
+            # Instantiate disclosure router (uses urllib to hit hindsight API, no client needed)
+            try:
+                from agent.disclosure_router import DisclosureRouter as _DR
+                _dr_inst = _DR(bank_id="hindsight", budget="low")
+                _dr_result = _dr_inst.check(original_user_message if isinstance(original_user_message, str) else "")
                 if _dr_result:
                     _disclosure_injected = _dr_result
+            except Exception:
+                pass
         except Exception:
             pass
         try:

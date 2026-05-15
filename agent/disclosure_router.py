@@ -145,9 +145,8 @@ class DisclosureRouter:
         if not matched:
             return ""
 
-        if not self.client:
-            logger.debug("DisclosureRouter: no hindsight client, skipping recall")
-            return ""
+        # Note: _recall() uses urllib directly to hit the hindsight HTTP API,
+        # so self.client is not required. Skip the old client guard.
 
         all_memories = []
         for rule in matched:
