@@ -12096,21 +12096,12 @@ class AIAgent:
 
         active_system_prompt = self._cached_system_prompt
 
-        # Memory Metacognition — initialize injection variables
-        _disclosure_injected = ""
+        # Memory Metacognition — strategy preflight + conversation recall
         _strategy_hint = ""
         _conv_recall_cache = ""
 
-        # Run disclosure router, strategy preflight, and conversation recall
         try:
             _mc_uc = {"user_id": self._user_id, "chat_id": self._chat_id} if getattr(self, '_user_id', None) else None
-            if _disclosure_router is not None:
-                _dr_result = _disclosure_router.check(original_user_message if isinstance(original_user_message, str) else "")
-                if _dr_result:
-                    _disclosure_injected = _dr_result
-        except Exception:
-            pass
-        try:
             from agent.memory_metacognition import build_strategy_preflight
             _sp = build_strategy_preflight(user_context=_mc_uc)
             _hint = _sp.check(original_user_message if isinstance(original_user_message, str) else "")
@@ -12126,10 +12117,6 @@ class AIAgent:
                 _conv_recall_cache = _cr_result
         except Exception:
             pass
-
-        # Inject disclosure router results into system prompt if any matched
-        if _disclosure_injected:
-            active_system_prompt = (active_system_prompt or "") + "\n\n" + _disclosure_injected
 
         # Inject strategy preflight hint if detected
         if _strategy_hint:
